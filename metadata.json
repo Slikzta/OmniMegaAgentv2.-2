@@ -1,0 +1,12 @@
+{
+  "name": "OmniAgent: The Ultimate AI",
+  "description": "A super-agent combining the best features of Claude, Gemini, ChatGPT, and Grok. Includes multimodal chat, image/video generation, live voice, and real-time grounding.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

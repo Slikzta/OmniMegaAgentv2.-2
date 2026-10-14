@@ -1,0 +1,9 @@
+{
+	"appId": "com.sierra.omniagent",
+	"appName": "OmniAgent",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https",
+		"cleartext": true
+	}
+}
