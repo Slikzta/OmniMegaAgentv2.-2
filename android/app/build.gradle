@@ -3,6 +3,13 @@ apply plugin: 'com.android.application'
 android {
     namespace = "com.sierra.omniagent"
     compileSdk = rootProject.ext.compileSdkVersion
+    buildToolsVersion = "34.0.0"
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
     defaultConfig {
         applicationId "com.sierra.omniagent"
         minSdkVersion rootProject.ext.minSdkVersion
