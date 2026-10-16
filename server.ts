@@ -37,7 +37,7 @@ interface ProviderConfig {
 const serverProviderStore: Record<string, Record<string, ProviderConfig>> = {};
 
 const DEFAULT_PROVIDERS: Record<string, { name: string; defaultModel: string; defaultUrl?: string }> = {
-  gemini: { name: "Google Gemini", defaultModel: "gemini-3-flash-preview" },
+  gemini: { name: "Google Gemini", defaultModel: "gemini-3.5-flash-lite" },
   openai: { name: "OpenAI", defaultModel: "gpt-4o", defaultUrl: "https://api.openai.com/v1" },
   anthropic: { name: "Anthropic Claude", defaultModel: "claude-3-7-sonnet-latest", defaultUrl: "https://api.anthropic.com/v1" },
   custom: { name: "Custom OpenAI-Compatible", defaultModel: "llama-3.3-70b-versatile", defaultUrl: "https://api.groq.com/openai/v1" },
@@ -47,7 +47,7 @@ const DEFAULT_PROVIDERS: Record<string, { name: string; defaultModel: string; de
 function getSessionStore(sessionId: string): { activeProvider: string; configs: Record<string, ProviderConfig> } {
   if (!serverProviderStore[sessionId]) {
     serverProviderStore[sessionId] = {
-      gemini: { id: "gemini", name: "Google Gemini", selectedModel: "gemini-3-flash-preview", apiKey: process.env.GEMINI_API_KEY || "" },
+      gemini: { id: "gemini", name: "Google Gemini", selectedModel: "gemini-3.5-flash-lite", apiKey: process.env.GEMINI_API_KEY || "" },
       openai: { id: "openai", name: "OpenAI", selectedModel: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
       anthropic: { id: "anthropic", name: "Anthropic Claude", selectedModel: "claude-3-7-sonnet-latest", baseUrl: "https://api.anthropic.com/v1" },
       custom: { id: "custom", name: "Custom OpenAI-Compatible", selectedModel: "llama-3.3-70b-versatile", baseUrl: "https://api.groq.com/openai/v1" },

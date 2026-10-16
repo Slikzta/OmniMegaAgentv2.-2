@@ -6,3 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+.tools/
+.gradle/
+android/.gradle/
+android/app/build/
+android/build/
+*.apk
+*.aab
+*.keystore
+*.jks
