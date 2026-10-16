@@ -22,7 +22,18 @@ export interface ProvidersConfigResponse {
 }
 
 export async function getProvidersConfig(): Promise<ProvidersConfigResponse> {
-  const res = await fetch('/api/providers/config');
+  const res = await fetch('/api/providers/config', {
+    headers: {
+      'Accept': 'application/json',
+    },
+  });
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+  }
+
   if (!res.ok) throw new Error(`Failed to load providers config: ${res.statusText}`);
   return res.json();
 }
