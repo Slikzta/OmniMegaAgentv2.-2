@@ -97,7 +97,7 @@ async function startServer() {
   // ==========================================
 
   // GET /api/providers/config - returns sanitized configuration (no exposed keys)
-  app.get("/api/providers/config", (req, res) => {
+  app.get(["/api/providers/config", "/api/provider/config"], (req, res) => {
     const sId = getClientSessionId(req);
     const store = getSessionStore(sId);
 
@@ -191,7 +191,7 @@ async function startServer() {
   });
 
   // POST /api/providers/config - save settings and credentials securely
-  app.post("/api/providers/config", (req, res) => {
+  app.post(["/api/providers/config", "/api/provider/config"], (req, res) => {
     const sId = getClientSessionId(req);
     const store = getSessionStore(sId);
     const { activeProvider, providerId, apiKey, model, baseUrl } = req.body;
@@ -212,7 +212,7 @@ async function startServer() {
   });
 
   // POST /api/providers/test - test connection to provider with actionable error messages
-  app.post("/api/providers/test", async (req, res) => {
+  app.post(["/api/providers/test", "/api/provider/test", "/api/providers/test-connection", "/api/provider/test-connection"], async (req, res) => {
     const sId = getClientSessionId(req);
     const store = getSessionStore(sId);
     const { providerId, apiKey, model, baseUrl } = req.body;
@@ -926,6 +926,11 @@ async function startServer() {
       url: process.env.SUPABASE_URL,
       anonKey: process.env.SUPABASE_ANON_KEY,
     });
+  });
+
+  // Ensure all unhandled /api/* requests return JSON errors instead of HTML index.html
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ success: false, error: `API route not found: ${req.method} ${req.path}` });
   });
 
   // Vite middleware for development

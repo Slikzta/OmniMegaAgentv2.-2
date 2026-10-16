@@ -36,11 +36,24 @@ export async function saveProviderConfig(data: {
 }): Promise<{ success: boolean; activeProvider: string }> {
   const res = await fetch('/api/providers/config', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Failed to save provider config: ${res.statusText}`);
-  return res.json();
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+  }
+
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new Error(json.error || `Failed to save provider config (${res.status})`);
+  }
+  return json;
 }
 
 export async function testProviderConnection(data: {
@@ -51,9 +64,22 @@ export async function testProviderConnection(data: {
 }): Promise<{ success: boolean; latencyMs?: number; message?: string; error?: string }> {
   const res = await fetch('/api/providers/test', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
     body: JSON.stringify(data),
   });
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    return {
+      success: false,
+      error: `Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`,
+    };
+  }
+
   const json = await res.json();
   if (!res.ok || !json.success) {
     return {
