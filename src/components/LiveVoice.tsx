@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition as CapSpeechRecognition } from '@capacitor-community/speech-recognition';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
@@ -38,6 +40,8 @@ export default function LiveVoice() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const speechRecognitionRef = useRef<any>(null);
+  const nativeListenerRef = useRef<any>(null);
+  const isNativeListeningRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const isRespondingRef = useRef<boolean>(false);
   const isActiveRef = useRef<boolean>(false);
@@ -291,7 +295,81 @@ export default function LiveVoice() {
     stopPlayback();
   };
 
-  const startSpeechToText = () => {
+  const startSpeechToText = async () => {
+    // 1. Native Capacitor Speech Recognition on Android / iOS
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const available = await CapSpeechRecognition.available();
+        if (!available?.available) {
+          console.warn("Native speech recognition not available on this device");
+          toast.error("Device speech recognition engine not available");
+          return;
+        }
+
+        const permStatus = await CapSpeechRecognition.checkPermissions();
+        if (permStatus.speechRecognition !== 'granted') {
+          const reqStatus = await CapSpeechRecognition.requestPermissions();
+          if (reqStatus.speechRecognition !== 'granted') {
+            toast.error("Microphone permission required for speech recognition");
+            return;
+          }
+        }
+
+        // Clean up previous listener
+        if (nativeListenerRef.current) {
+          try {
+            await nativeListenerRef.current.remove();
+          } catch (_) {}
+          nativeListenerRef.current = null;
+        }
+
+        // Listen for partial results to update speech detection indicator
+        nativeListenerRef.current = await CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
+          if (isSpeakingRef.current || isRespondingRef.current) return;
+          if (data.matches && data.matches.length > 0 && data.matches[0].trim()) {
+            setUserSpeechDetected(true);
+          }
+        });
+
+        isNativeListeningRef.current = true;
+
+        const result = await CapSpeechRecognition.start({
+          language: 'en-US',
+          maxResults: 1,
+          prompt: '',
+          popup: false,
+          partialResults: true,
+        });
+
+        isNativeListeningRef.current = false;
+        setUserSpeechDetected(false);
+
+        const recognizedText = result?.matches?.[0] || '';
+        if (recognizedText.trim() && !isSpeakingRef.current && !isRespondingRef.current) {
+          handleUserUtterance(recognizedText.trim());
+        } else {
+          // If no utterance was recognized, restart listening in continuous mode
+          if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
+            startSpeechToText();
+          }
+        }
+        return;
+      } catch (nativeErr: any) {
+        isNativeListeningRef.current = false;
+        setUserSpeechDetected(false);
+        console.warn("Capacitor speech recognition error:", nativeErr);
+        if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
+          setTimeout(() => {
+            if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current) {
+              startSpeechToText();
+            }
+          }, 400);
+        }
+        return;
+      }
+    }
+
+    // 2. Web browser fallback for development environment
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       console.warn("Speech recognition is not supported in this environment");
@@ -361,7 +439,21 @@ export default function LiveVoice() {
     }
   };
 
-  const stopSpeechToText = () => {
+  const stopSpeechToText = async () => {
+    if (Capacitor.isNativePlatform()) {
+      isNativeListeningRef.current = false;
+      if (nativeListenerRef.current) {
+        try {
+          await nativeListenerRef.current.remove();
+        } catch (_) {}
+        nativeListenerRef.current = null;
+      }
+      try {
+        await CapSpeechRecognition.stop();
+      } catch (_) {}
+      return;
+    }
+
     if (speechRecognitionRef.current) {
       try {
         speechRecognitionRef.current.stop();
