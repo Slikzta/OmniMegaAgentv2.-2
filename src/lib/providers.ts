@@ -366,6 +366,120 @@ export async function streamChat(
 ): Promise<() => void> {
   const controller = new AbortController();
 
+  // On native Capacitor, call Gemini API directly from client with saved key
+  if (Capacitor.isNativePlatform()) {
+    const keys = getNativeStoredKeys();
+    const effectiveKey = keys[params.provider || 'gemini'] || keys.gemini;
+
+    if (!effectiveKey) {
+      callbacks.onError(new Error("Gemini API key is required. Please set your key in Settings."));
+      return () => controller.abort();
+    }
+
+    const model = params.model || "gemini-3.5-flash-lite";
+
+    // Format messages for Gemini API
+    const contents = params.messages.map((m) => {
+      const parts: any[] = [{ text: m.content || "" }];
+      if (Array.isArray(m.attachments)) {
+        m.attachments.forEach((att: string) => {
+          if (att.startsWith("data:")) {
+            const [header, b64] = att.split(";base64,");
+            const mimeType = header.replace("data:", "");
+            parts.push({
+              inlineData: { mimeType, data: b64 }
+            });
+          }
+        });
+      }
+      return {
+        role: m.role === "assistant" || m.role === "model" ? "model" : "user",
+        parts
+      };
+    });
+
+    const tools: any[] = [];
+    if (params.useSearch) tools.push({ googleSearch: {} });
+
+    const reqBody: any = {
+      contents,
+      generationConfig: {
+        temperature: params.temperature,
+        topP: params.topP,
+        topK: params.topK,
+      }
+    };
+    if (params.systemInstruction) {
+      reqBody.systemInstruction = {
+        parts: [{ text: params.systemInstruction }]
+      };
+    }
+    if (tools.length > 0) {
+      reqBody.tools = tools;
+    }
+
+    (async () => {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${effectiveKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reqBody),
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          callbacks.onError(new Error(`Gemini API error (${res.status}): ${errText.slice(0, 200)}`));
+          return;
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) {
+          callbacks.onError(new Error('No response stream available.'));
+          return;
+        }
+
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const dataStr = trimmed.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+              const textChunk = data.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (textChunk) {
+                callbacks.onChunk(textChunk);
+              }
+              const grounding = data.candidates?.[0]?.groundingMetadata;
+              if (grounding && callbacks.onMetadata) {
+                callbacks.onMetadata(grounding);
+              }
+            } catch (_) {}
+          }
+        }
+        callbacks.onDone();
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          callbacks.onError(err);
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  }
+
+  // Web dev behavior remains unchanged
   try {
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
@@ -373,6 +487,13 @@ export async function streamChat(
       body: JSON.stringify(params),
       signal: controller.signal,
     });
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('text/event-stream') && !contentType.includes('application/json')) {
+      const text = await res.text();
+      callbacks.onError(new Error(`Server returned non-stream response (${res.status}): ${text.slice(0, 120)}`));
+      return () => controller.abort();
+    }
 
     if (!res.ok) {
       const errText = await res.text();
@@ -445,11 +566,47 @@ export async function generateMediaImage(params: {
   personGeneration?: string;
   model?: string;
 }): Promise<string> {
+  if (Capacitor.isNativePlatform()) {
+    const keys = getNativeStoredKeys();
+    const effectiveKey = keys.gemini;
+    if (!effectiveKey) {
+      throw new Error("Gemini API key is required for image generation. Please set your key in Settings.");
+    }
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${effectiveKey}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instances: [{ prompt: params.prompt }],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio: params.aspectRatio || "1:1",
+        }
+      })
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await res.text();
+      throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+    }
+    const data = await res.json();
+    const b64 = data.predictions?.[0]?.bytesBase64Encoded;
+    if (b64) {
+      return `data:image/jpeg;base64,${b64}`;
+    }
+    throw new Error(data.error?.message || "Failed to generate image on device");
+  }
+
   const res = await fetch('/api/media/image', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+  }
   const data = await res.json();
   if (!res.ok || !data.imageUrl) {
     throw new Error(data.error || 'Failed to generate image');
@@ -469,6 +626,11 @@ export async function generateMediaVideo(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+  }
   const data = await res.json();
   if (!res.ok || !data.videoUrl) {
     throw new Error(data.error || 'Failed to generate video');
@@ -477,7 +639,21 @@ export async function generateMediaVideo(params: {
 }
 
 export async function fetchLiveVoiceToken(): Promise<string> {
+  if (Capacitor.isNativePlatform()) {
+    const keys = getNativeStoredKeys();
+    const key = keys.gemini;
+    if (!key) {
+      throw new Error('Gemini API key is required for Continuous Voice Chat. Please enter your API key in Settings.');
+    }
+    return key;
+  }
+
   const res = await fetch('/api/live/token', { method: 'POST' });
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 120)}`);
+  }
   const data = await res.json();
   if (!res.ok || !data.token) {
     throw new Error(data.error || 'Failed to obtain live voice ephemeral token');
