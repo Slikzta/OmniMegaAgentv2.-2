@@ -1,3 +1,5 @@
+import { Capacitor } from '@capacitor/core';
+
 export interface ProviderInfo {
   id: string;
   name: string;
@@ -21,7 +23,138 @@ export interface ProvidersConfigResponse {
   providers: Record<string, ProviderInfo>;
 }
 
+const STORAGE_KEY_CONFIG = 'omni_providers_config';
+const STORAGE_KEY_ACTIVE = 'omni_active_provider';
+const STORAGE_KEY_KEYS = 'omni_provider_keys';
+
+function getNativeStoredKeys(): Record<string, string> {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_KEYS) : null;
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveNativeStoredKey(providerId: string, apiKey: string) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const keys = getNativeStoredKeys();
+    keys[providerId] = apiKey;
+    localStorage.setItem(STORAGE_KEY_KEYS, JSON.stringify(keys));
+  } catch {}
+}
+
+function getDefaultProvidersMap(): Record<string, ProviderInfo> {
+  const keys = getNativeStoredKeys();
+  return {
+    gemini: {
+      id: "gemini",
+      name: "Google Gemini",
+      selectedModel: "gemini-3.5-flash-lite",
+      hasKey: Boolean(keys.gemini),
+      capabilities: {
+        text: true,
+        streaming: true,
+        multimodal: true,
+        grounding: true,
+        imageGen: true,
+        videoGen: true,
+        liveVoice: true,
+      },
+    },
+    openai: {
+      id: "openai",
+      name: "OpenAI",
+      selectedModel: "gpt-4o",
+      baseUrl: "https://api.openai.com/v1",
+      hasKey: Boolean(keys.openai),
+      capabilities: {
+        text: true,
+        streaming: true,
+        multimodal: true,
+        grounding: false,
+        imageGen: false,
+        videoGen: false,
+        liveVoice: false,
+      },
+    },
+    anthropic: {
+      id: "anthropic",
+      name: "Anthropic Claude",
+      selectedModel: "claude-3-7-sonnet-latest",
+      baseUrl: "https://api.anthropic.com/v1",
+      hasKey: Boolean(keys.anthropic),
+      capabilities: {
+        text: true,
+        streaming: true,
+        multimodal: true,
+        grounding: false,
+        imageGen: false,
+        videoGen: false,
+        liveVoice: false,
+      },
+    },
+    custom: {
+      id: "custom",
+      name: "Custom OpenAI-Compatible",
+      selectedModel: "llama-3.3-70b-versatile",
+      baseUrl: "https://api.groq.com/openai/v1",
+      hasKey: Boolean(keys.custom),
+      capabilities: {
+        text: true,
+        streaming: true,
+        multimodal: true,
+        grounding: false,
+        imageGen: false,
+        videoGen: false,
+        liveVoice: false,
+      },
+    },
+    ollama: {
+      id: "ollama",
+      name: "Ollama (Local/Host)",
+      selectedModel: "llama3.2",
+      baseUrl: "http://localhost:11434",
+      hasKey: true,
+      capabilities: {
+        text: true,
+        streaming: true,
+        multimodal: false,
+        grounding: false,
+        imageGen: false,
+        videoGen: false,
+        liveVoice: false,
+      },
+    },
+  };
+}
+
 export async function getProvidersConfig(): Promise<ProvidersConfigResponse> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const active = (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY_ACTIVE)) || "gemini";
+      const rawConfig = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_CONFIG) : null;
+      const providers = getDefaultProvidersMap();
+      if (rawConfig) {
+        const parsed = JSON.parse(rawConfig);
+        const keys = getNativeStoredKeys();
+        for (const [id, prov] of Object.entries(parsed as Record<string, Partial<ProviderInfo>>)) {
+          if (providers[id]) {
+            providers[id] = {
+              ...providers[id],
+              ...prov,
+              hasKey: Boolean(keys[id]),
+            };
+          }
+        }
+      }
+      return { activeProvider: active, providers };
+    } catch {
+      return { activeProvider: "gemini", providers: getDefaultProvidersMap() };
+    }
+  }
+
   const res = await fetch('/api/providers/config', {
     headers: {
       'Accept': 'application/json',
@@ -45,6 +178,32 @@ export async function saveProviderConfig(data: {
   model?: string;
   baseUrl?: string;
 }): Promise<{ success: boolean; activeProvider: string }> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      let active = (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY_ACTIVE)) || "gemini";
+      if (data.activeProvider) {
+        active = data.activeProvider;
+        localStorage.setItem(STORAGE_KEY_ACTIVE, active);
+      }
+      if (data.providerId) {
+        if (data.apiKey) {
+          saveNativeStoredKey(data.providerId, data.apiKey);
+        }
+        const rawConfig = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_CONFIG) : null;
+        const configMap: Record<string, any> = rawConfig ? JSON.parse(rawConfig) : {};
+        if (!configMap[data.providerId]) configMap[data.providerId] = {};
+        if (data.model !== undefined) configMap[data.providerId].selectedModel = data.model;
+        if (data.baseUrl !== undefined) configMap[data.providerId].baseUrl = data.baseUrl;
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(configMap));
+        }
+      }
+      return { success: true, activeProvider: active };
+    } catch (e: any) {
+      throw new Error(`Failed to save settings locally on device: ${e.message}`);
+    }
+  }
+
   const res = await fetch('/api/providers/config', {
     method: 'POST',
     headers: { 
@@ -73,6 +232,85 @@ export async function testProviderConnection(data: {
   model?: string;
   baseUrl?: string;
 }): Promise<{ success: boolean; latencyMs?: number; message?: string; error?: string }> {
+  if (Capacitor.isNativePlatform()) {
+    const startTime = Date.now();
+    const keys = getNativeStoredKeys();
+    const effectiveKey = data.apiKey?.trim() || keys[data.providerId];
+
+    if (data.providerId === "gemini") {
+      if (!effectiveKey) {
+        return { success: false, error: "Gemini API key is required. Please provide a key in settings." };
+      }
+      const model = data.model || "gemini-3.5-flash-lite";
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${effectiveKey}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: "Hello, reply with one word: 'Ready'." }] }],
+          }),
+        });
+        const latencyMs = Date.now() - startTime;
+        const json = await res.json();
+        if (!res.ok) {
+          return {
+            success: false,
+            latencyMs,
+            error: json.error?.message || `Gemini API returned error ${res.status}`,
+          };
+        }
+        const reply = json.candidates?.[0]?.content?.parts?.[0]?.text || "Ready";
+        return {
+          success: true,
+          latencyMs,
+          message: `Successfully connected to Gemini (${model}). Response: ${reply.trim().slice(0, 30)}`,
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          latencyMs: Date.now() - startTime,
+          error: `Network error connecting to Gemini API: ${err.message}`,
+        };
+      }
+    }
+
+    if (data.providerId === "openai" || data.providerId === "custom") {
+      const url = (data.baseUrl || (data.providerId === "openai" ? "https://api.openai.com/v1" : "https://api.groq.com/openai/v1")).replace(/\/+$/, "") + "/chat/completions";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (effectiveKey) headers["Authorization"] = `Bearer ${effectiveKey}`;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: data.model || (data.providerId === "openai" ? "gpt-4o-mini" : "llama-3.3-70b-versatile"),
+            messages: [{ role: "user", content: "Reply with 'Ready'" }],
+            max_tokens: 10,
+          }),
+        });
+        const latencyMs = Date.now() - startTime;
+        const json = await res.json();
+        if (!res.ok) {
+          return { success: false, latencyMs, error: json.error?.message || `API error (${res.status})` };
+        }
+        return {
+          success: true,
+          latencyMs,
+          message: `Successfully connected to ${data.providerId} (${data.model}).`,
+        };
+      } catch (err: any) {
+        return { success: false, latencyMs: Date.now() - startTime, error: err.message };
+      }
+    }
+
+    return {
+      success: true,
+      latencyMs: Date.now() - startTime,
+      message: `Configured on-device for ${data.providerId}.`,
+    };
+  }
+
   const res = await fetch('/api/providers/test', {
     method: 'POST',
     headers: { 

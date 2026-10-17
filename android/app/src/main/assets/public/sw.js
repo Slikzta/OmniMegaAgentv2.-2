@@ -81,12 +81,12 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "1872c500de691dce40960bb85481de07"
   }, {
     "url": "index.html",
-    "revision": "39ea05ce94b7a5de5cd53aeac1964ad4"
+    "revision": "71f509e2b81a01545205b465a7c00043"
   }, {
-    "url": "assets/index-CVWMziT5.css",
+    "url": "assets/index-O6wXAtGM.js",
     "revision": null
   }, {
-    "url": "assets/index-C-lKMLDF.js",
+    "url": "assets/index-CVWMziT5.css",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",
