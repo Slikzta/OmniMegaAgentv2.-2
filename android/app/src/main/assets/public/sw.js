@@ -81,9 +81,9 @@ define(['./workbox-7e5eb42b'], (function (workbox) { 'use strict';
     "revision": "1872c500de691dce40960bb85481de07"
   }, {
     "url": "index.html",
-    "revision": "6ea9ef715b4e54ba0e78f38ece35ddab"
+    "revision": "08d0d3a397abdcfd7b33e94a24c29952"
   }, {
-    "url": "assets/index-D1Lowmh4.js",
+    "url": "assets/index-bBMUL6cV.js",
     "revision": null
   }, {
     "url": "assets/index-CVWMziT5.css",

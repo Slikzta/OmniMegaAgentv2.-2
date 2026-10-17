@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
@@ -9,7 +8,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { toast } from 'sonner';
 import { SIERRA_CORE_PERSONA } from '../lib/persona';
-import { fetchLiveVoiceToken } from '../lib/providers';
+import { streamChat } from '../lib/providers';
 
 interface TranscriptItem {
   id: string;
@@ -38,14 +37,24 @@ export default function LiveVoice() {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const transcriptBufferRef = useRef<string>('');
   const speechRecognitionRef = useRef<any>(null);
   const isSpeakingRef = useRef<boolean>(false);
+  const isRespondingRef = useRef<boolean>(false);
+  const isActiveRef = useRef<boolean>(false);
+  const transcriptsRef = useRef<TranscriptItem[]>([]);
 
-  // Keep ref synchronized with state to prevent race conditions in Web Audio callbacks
+  // Keep refs synchronized with state
   useEffect(() => {
     isSpeakingRef.current = isSpeaking;
   }, [isSpeaking]);
+
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
+
+  useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
 
   // Auto-scroll transcript container
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -75,22 +84,153 @@ export default function LiveVoice() {
     }
   };
 
+  const playTextToSpeech = (text: string) => {
+    if (!text.trim()) return;
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      if (isActiveRef.current && mode === 'continuous') {
+        startSpeechToText();
+      }
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+
+      // Clean markdown symbols for natural TTS speech
+      const cleanText = text.replace(/[*#_`~>]/g, '').trim();
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.rate = 1.05;
+      utterance.pitch = 1.0;
+      utterance.lang = 'en-US';
+
+      // Pick natural voice if available
+      const voices = window.speechSynthesis.getVoices();
+      if (voices && voices.length > 0) {
+        const preferred = voices.find(v => 
+          v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Female'))
+        ) || voices.find(v => v.lang.startsWith('en'));
+        if (preferred) {
+          utterance.voice = preferred;
+        }
+      }
+
+      utterance.onstart = () => {
+        setIsSpeaking(true);
+        isSpeakingRef.current = true;
+      };
+
+      utterance.onend = () => {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        // Resume continuous listening after Sierra finishes speaking
+        if (isActiveRef.current && mode === 'continuous') {
+          startSpeechToText();
+        }
+      };
+
+      utterance.onerror = (e) => {
+        console.warn("TTS playback error:", e);
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        if (isActiveRef.current && mode === 'continuous') {
+          startSpeechToText();
+        }
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (ttsErr) {
+      console.warn("TTS execution error:", ttsErr);
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+      if (isActiveRef.current && mode === 'continuous') {
+        startSpeechToText();
+      }
+    }
+  };
+
+  const handleUserUtterance = async (userText: string) => {
+    if (!userText.trim() || isRespondingRef.current) return;
+    isRespondingRef.current = true;
+
+    // 1. Render user speech in transcript UI
+    const userItem: TranscriptItem = {
+      id: 'user-' + Date.now(),
+      sender: 'user',
+      text: userText,
+      timestamp: Date.now(),
+    };
+    setTranscripts(prev => [...prev.slice(-20), userItem]);
+    persistVoiceMessage('user', userText);
+
+    // 2. Render Sierra placeholder in transcript UI
+    const sierraId = 'sierra-' + (Date.now() + 1);
+    setTranscripts(prev => [...prev, {
+      id: sierraId,
+      sender: 'sierra',
+      text: '',
+      timestamp: Date.now(),
+    }]);
+
+    let accumulatedText = '';
+
+    // Stop STT while model is thinking/speaking to avoid picking up speaker output
+    stopSpeechToText();
+
+    try {
+      const history = transcriptsRef.current.slice(-6).map(t => ({
+        role: t.sender === 'user' ? 'user' : 'model',
+        content: t.text,
+      }));
+
+      // 3. Send captured transcript to native direct Gemini streamChat
+      await streamChat({
+        messages: [
+          ...history,
+          { role: 'user', content: userText }
+        ],
+        systemInstruction: `${SIERRA_CORE_PERSONA}\n\nYou are Sierra in Continuous Voice Chat. Speak warmly, directly, and concisely (1-2 short natural sentences). Do not use markdown, bullet points, asterisks, or formatting because your response is being spoken aloud through Text-to-Speech.`,
+      }, {
+        onChunk: (chunk: string) => {
+          accumulatedText += chunk;
+          // Render streamed response into transcript UI
+          setTranscripts(prev => prev.map(item => item.id === sierraId ? { ...item, text: accumulatedText } : item));
+        },
+        onDone: () => {
+          isRespondingRef.current = false;
+          if (accumulatedText.trim()) {
+            persistVoiceMessage('sierra', accumulatedText.trim());
+            // 4. Trigger Text-to-Speech playback for the response
+            playTextToSpeech(accumulatedText.trim());
+          } else {
+            if (isActiveRef.current && mode === 'continuous') {
+              startSpeechToText();
+            }
+          }
+        },
+        onError: (err: Error) => {
+          isRespondingRef.current = false;
+          console.error("Continuous voice stream error:", err);
+          toast.error(`Voice error: ${err.message}`);
+          if (isActiveRef.current && mode === 'continuous') {
+            startSpeechToText();
+          }
+        }
+      });
+    } catch (err: any) {
+      isRespondingRef.current = false;
+      toast.error(`Failed to generate voice response: ${err.message}`);
+      if (isActiveRef.current && mode === 'continuous') {
+        startSpeechToText();
+      }
+    }
+  };
+
   const startSession = async () => {
     setIsConnecting(true);
     setConnectionError(null);
 
     try {
-      // 1. Fetch short-lived ephemeral token from secure server endpoint
-      let liveToken: string;
-      try {
-        liveToken = await fetchLiveVoiceToken();
-      } catch (tokenErr: any) {
-        throw new Error(
-          tokenErr.message || "Failed to initialize Live Voice session. Please verify your Gemini API key in Settings."
-        );
-      }
-
-      // 2. Request user microphone with hardware Acoustic Echo Cancellation enabled
+      // 1. Request user microphone with hardware Acoustic Echo Cancellation enabled
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -109,84 +249,18 @@ export default function LiveVoice() {
         throw new Error("Unable to access microphone: " + (micErr.message || "Device error"));
       }
 
-      // 3. Connect to Gemini Live using the ephemeral token
-      const ai = new GoogleGenAI({ apiKey: liveToken });
+      // 2. Start audio capture for visual audio monitoring
+      await startAudioCapture();
 
-      const liveSystemInstruction = `${SIERRA_CORE_PERSONA}
-
-Current Modality: LIVE TWO-WAY SPOKEN AUDIO
-Spoken Interaction Rules:
-- Keep answers naturally conversational and concise (1-3 sentences) so dialogue flows smoothly like a real phone call or in-person talk.
-- Speak warmly and directly. No robotic pleasantries or repetitive greetings.
-- Listen actively and respond directly to what the user shares.`;
-
-      const session = await ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } },
-          },
-          systemInstruction: liveSystemInstruction,
-        },
-        callbacks: {
-          onopen: () => {
-            setIsActive(true);
-            setIsConnecting(false);
-            setConnectionError(null);
-            startAudioCapture();
-            startSpeechToText();
-            toast.success("Sierra is listening!");
-          },
-          onmessage: (message: LiveServerMessage) => {
-            // Handle audio response chunk
-            if (message.serverContent?.modelTurn?.parts) {
-              for (const part of message.serverContent.modelTurn.parts) {
-                if (part.inlineData?.data) {
-                  playAudio(part.inlineData.data);
-                }
-                if (part.text) {
-                  transcriptBufferRef.current += part.text;
-                }
-              }
-            }
-
-            // Handle turn completion
-            if (message.serverContent?.turnComplete) {
-              const completedText = transcriptBufferRef.current.trim() || "Spoken response";
-              if (completedText) {
-                const item: TranscriptItem = {
-                  id: 'sierra-' + Date.now(),
-                  sender: 'sierra',
-                  text: completedText,
-                  timestamp: Date.now(),
-                };
-                setTranscripts(prev => [...prev.slice(-20), item]);
-                persistVoiceMessage('sierra', completedText);
-              }
-              transcriptBufferRef.current = '';
-            }
-
-            // Handle barge-in / user interruption
-            if (message.serverContent?.interrupted) {
-              stopPlayback();
-            }
-          },
-          onclose: (closeEvent: any) => {
-            console.log("Live session closed:", closeEvent);
-            stopSession();
-          },
-          onerror: (err: any) => {
-            console.error("Live API Error:", err);
-            setConnectionError(err?.message || "Live connection interrupted. Please tap Reconnect.");
-            stopSession();
-          },
-        },
-      });
-
-      sessionRef.current = session;
+      // 3. Mark session active and start speech recognition
+      setIsActive(true);
+      isActiveRef.current = true;
+      setIsConnecting(false);
+      setConnectionError(null);
+      startSpeechToText();
+      toast.success("Sierra is listening!");
     } catch (error: any) {
-      console.error("Failed to connect to Live API:", error);
+      console.error("Failed to start voice session:", error);
       setIsConnecting(false);
       setConnectionError(error.message || "Failed to establish voice connection.");
       toast.error(error.message || "Failed to start live voice session");
@@ -196,6 +270,8 @@ Spoken Interaction Rules:
 
   const stopSession = () => {
     setIsActive(false);
+    isActiveRef.current = false;
+    isRespondingRef.current = false;
     setIsConnecting(false);
     setIsSpeaking(false);
     isSpeakingRef.current = false;
@@ -217,7 +293,17 @@ Spoken Interaction Rules:
 
   const startSpeechToText = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      console.warn("Speech recognition is not supported in this environment");
+      return;
+    }
+
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch (_) {}
+      speechRecognitionRef.current = null;
+    }
 
     try {
       const recognition = new SpeechRecognition();
@@ -226,29 +312,46 @@ Spoken Interaction Rules:
       recognition.lang = 'en-US';
 
       recognition.onresult = (event: any) => {
-        // If Sierra is currently speaking through the speakers, suppress transcription to avoid acoustic loop
-        if (isSpeakingRef.current) return;
+        // If Sierra is speaking or actively responding, suppress transcription
+        if (isSpeakingRef.current || isRespondingRef.current) return;
 
+        let interimText = '';
         let finalPhrase = '';
+
         for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const text = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            finalPhrase += event.results[i][0].transcript;
+            finalPhrase += text;
+          } else {
+            interimText += text;
           }
         }
+
+        if (interimText.trim()) {
+          setUserSpeechDetected(true);
+        }
+
         if (finalPhrase.trim()) {
-          const item: TranscriptItem = {
-            id: 'user-' + Date.now(),
-            sender: 'user',
-            text: finalPhrase.trim(),
-            timestamp: Date.now(),
-          };
-          setTranscripts(prev => [...prev.slice(-20), item]);
-          persistVoiceMessage('user', finalPhrase.trim());
+          const userText = finalPhrase.trim();
+          setUserSpeechDetected(false);
+          handleUserUtterance(userText);
         }
       };
 
-      recognition.onerror = () => {
-        // Soft-fail recognition; audio still streams directly to Gemini Live
+      recognition.onerror = (event: any) => {
+        if (event.error === 'no-speech' || event.error === 'audio-capture') {
+          return;
+        }
+        console.warn("Speech recognition error:", event.error);
+      };
+
+      recognition.onend = () => {
+        // In continuous mode, if still active and not speaking, keep listening
+        if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
+          try {
+            recognition.start();
+          } catch (_) {}
+        }
       };
 
       recognition.start();
@@ -422,6 +525,11 @@ Spoken Interaction Rules:
   };
 
   const stopPlayback = () => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (_) {}
+    }
     activeSourcesRef.current.forEach(source => {
       try {
         source.stop();
