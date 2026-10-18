@@ -538,16 +538,25 @@ export default function LiveVoice() {
           }
         }, RECOGNITION_TIMEOUT_MS);
 
-        const result = await CapSpeechRecognition.start({
-          language: 'en-US',
-          maxResults: 1,
-          prompt: '',
-          popup: false,
-          partialResults: true,
-        });
+        addDebugLog('STT:Start', 'Invoking CapSpeechRecognition.start()...');
+        console.log("[Native STT:Start] Invoking CapSpeechRecognition.start()...");
 
-        addDebugLog('STT:Start', `start() resolved with: ${JSON.stringify(result)}`);
-        console.log("[Native STT:Start] CapSpeechRecognition.start resolved with result:", result);
+        let result: any = null;
+        try {
+          result = await CapSpeechRecognition.start({
+            language: 'en-US',
+            maxResults: 1,
+            prompt: '',
+            popup: false,
+            partialResults: true,
+          });
+          addDebugLog('STT:Start', `CapSpeechRecognition.start resolved with raw value: ${JSON.stringify(result)}`);
+          console.log("[Native STT:Start] CapSpeechRecognition.start resolved with raw value:", result);
+        } catch (startErr: any) {
+          addDebugLog('STT:Start', `CapSpeechRecognition.start caught thrown error or rejection: ${startErr?.message || JSON.stringify(startErr)}`);
+          console.error("[Native STT:Start] CapSpeechRecognition.start caught thrown error or rejection:", startErr);
+          throw startErr;
+        }
 
         // If the platform returns matches directly in the start resolution
         if (result?.matches && result.matches.length > 0 && result.matches[0].trim()) {
