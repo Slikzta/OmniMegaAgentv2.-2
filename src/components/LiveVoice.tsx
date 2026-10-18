@@ -337,7 +337,9 @@ export default function LiveVoice() {
   };
 
   const startSession = async () => {
-    addDebugLog('Session', 'Starting voice session...');
+    const sessionStartTime = new Date().toISOString();
+    addDebugLog('Session', `Starting voice session... [${sessionStartTime}]`);
+    console.log(`[Session] Starting voice session... [${sessionStartTime}]`);
     setIsConnecting(true);
     setConnectionError(null);
 
@@ -470,6 +472,8 @@ export default function LiveVoice() {
         console.log("[Native STT:Start] Attaching partialResults and listeningState listeners...");
 
         // Listen for partial and final result updates
+        addDebugLog('STT:Start', 'Calling await CapSpeechRecognition.addListener("partialResults")...');
+        console.log("[Native STT:Start] Calling await CapSpeechRecognition.addListener('partialResults')...");
         nativeListenerRef.current = await CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
           addDebugLog('partialResults', `matches: ${JSON.stringify(data?.matches)}`);
           console.log("[Native STT:partialResults] Event received with matches:", data?.matches);
@@ -499,8 +503,12 @@ export default function LiveVoice() {
             }
           }
         });
+        addDebugLog('STT:Start', 'Completed await CapSpeechRecognition.addListener("partialResults")');
+        console.log("[Native STT:Start] Completed await CapSpeechRecognition.addListener('partialResults')");
 
         // Listen for native engine listening state transitions
+        addDebugLog('STT:Start', 'Calling await CapSpeechRecognition.addListener("listeningState")...');
+        console.log("[Native STT:Start] Calling await CapSpeechRecognition.addListener('listeningState')...");
         nativeStateListenerRef.current = await CapSpeechRecognition.addListener('listeningState', (data: { status: 'started' | 'stopped' }) => {
           addDebugLog('listeningState', `status: "${data?.status}", currentBuffer: "${currentTranscriptRef.current}"`);
           console.log("[Native STT:listeningState] State changed to:", data?.status);
@@ -513,6 +521,8 @@ export default function LiveVoice() {
             }
           }
         });
+        addDebugLog('STT:Start', 'Completed await CapSpeechRecognition.addListener("listeningState")');
+        console.log("[Native STT:Start] Completed await CapSpeechRecognition.addListener('listeningState')");
 
         isNativeListeningRef.current = true;
         addDebugLog('STT:Start', 'Calling CapSpeechRecognition.start({ language: "en-US", partialResults: true })');
