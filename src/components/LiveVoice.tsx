@@ -30,6 +30,21 @@ export default function LiveVoice() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [userSpeechDetected, setUserSpeechDetected] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState<'Aoede' | 'Zephyr' | 'Kore' | 'Puck'>('Aoede');
+  const [debugLogs, setDebugLogs] = useState<{ id: string; time: string; stage: string; detail: string }[]>([]);
+  const debugScrollRef = useRef<HTMLDivElement>(null);
+
+  const addDebugLog = (stage: string, detail: string) => {
+    const time = new Date().toLocaleTimeString();
+    console.log(`[VoiceDebug] [${time}] [${stage}] ${detail}`);
+    setDebugLogs(prev => [
+      ...prev.slice(-49),
+      { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, time, stage, detail }
+    ]);
+  };
+
+  useEffect(() => {
+    debugScrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [debugLogs]);
 
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -188,6 +203,8 @@ export default function LiveVoice() {
     currentTranscriptRef.current = '';
     setUserSpeechDetected(false);
 
+    addDebugLog('commitCurrentUtterance', `captured: "${textToCommit}" (isSpeaking=${isSpeakingRef.current}, isResponding=${isRespondingRef.current})`);
+
     if (!textToCommit) {
       console.log("[Native STT:Commit] Buffer empty, no speech to commit.");
       return;
@@ -205,6 +222,7 @@ export default function LiveVoice() {
   };
 
   const handleSilenceOrEmpty = () => {
+    addDebugLog('STT:SilenceOrEmpty', `Round completed without speech (failures: ${consecutiveFailuresRef.current + 1}/${MAX_RECOGNITION_RETRIES})`);
     console.log("[Native STT] Listening round completed with no speech captured");
     isNativeListeningRef.current = false;
     setUserSpeechDetected(false);
@@ -222,8 +240,10 @@ export default function LiveVoice() {
   };
 
   const handleUserUtterance = async (userText: string) => {
+    addDebugLog('handleUserUtterance', `captured: "${userText}" (isResponding=${isRespondingRef.current})`);
     console.log("[Voice:Handoff] handleUserUtterance triggered with text:", userText);
     if (!userText.trim() || isRespondingRef.current) {
+      addDebugLog('handleUserUtterance', `Ignored: empty or already responding`);
       console.log("[Voice:Handoff] Utterance discarded: empty or isRespondingRef is true");
       return;
     }
@@ -261,6 +281,7 @@ export default function LiveVoice() {
       }));
 
       // 3. Send captured transcript to native direct Gemini streamChat
+      addDebugLog('streamChat', `called with prompt: "${userText}"`);
       console.log("[Voice:streamChat] Initiating direct streamChat call with prompt:", userText);
       await streamChat({
         messages: [
@@ -271,11 +292,15 @@ export default function LiveVoice() {
       }, {
         onChunk: (chunk: string) => {
           accumulatedText += chunk;
+          if (accumulatedText.length === chunk.length) {
+            addDebugLog('streamChat:Chunk', `First chunk received (${chunk.length} chars)`);
+          }
           console.log("[Voice:streamChat:Chunk] Chunk received length:", chunk.length);
           // Render streamed response into transcript UI
           setTranscripts(prev => prev.map(item => item.id === sierraId ? { ...item, text: accumulatedText } : item));
         },
         onDone: async () => {
+          addDebugLog('streamChat:Done', `Completed (${accumulatedText.length} chars)`);
           console.log("[Voice:streamChat:Done] Stream finished successfully. Full text:", accumulatedText.trim());
           isRespondingRef.current = false;
           if (accumulatedText.trim()) {
@@ -291,6 +316,7 @@ export default function LiveVoice() {
           }
         },
         onError: (err: Error) => {
+          addDebugLog('streamChat:Error', `${err.message}`);
           isRespondingRef.current = false;
           console.error("[Voice:streamChat:Error] Stream chat error occurred:", err);
           toast.error(`Voice error: ${err.message}`);
@@ -300,6 +326,7 @@ export default function LiveVoice() {
         }
       });
     } catch (err: any) {
+      addDebugLog('streamChat:Catch', `${err.message}`);
       isRespondingRef.current = false;
       console.error("[Voice:streamChat:Catch] Failed to generate voice response:", err);
       toast.error(`Failed to generate voice response: ${err.message}`);
@@ -310,6 +337,7 @@ export default function LiveVoice() {
   };
 
   const startSession = async () => {
+    addDebugLog('Session', 'Starting voice session...');
     setIsConnecting(true);
     setConnectionError(null);
 
@@ -342,9 +370,11 @@ export default function LiveVoice() {
       setIsConnecting(false);
       setConnectionError(null);
       consecutiveFailuresRef.current = 0;
+      addDebugLog('Session', 'Session active, starting speech-to-text');
       startSpeechToText();
       toast.success("Sierra is listening!");
     } catch (error: any) {
+      addDebugLog('Session:Error', error.message || 'Failed to start session');
       console.error("Failed to start voice session:", error);
       setIsConnecting(false);
       setConnectionError(error.message || "Failed to establish voice connection.");
@@ -354,6 +384,7 @@ export default function LiveVoice() {
   };
 
   const stopSession = () => {
+    addDebugLog('Session', 'Session stopped');
     setIsActive(false);
     isActiveRef.current = false;
     isRespondingRef.current = false;
@@ -399,24 +430,32 @@ export default function LiveVoice() {
     // 1. Native Capacitor Speech Recognition on Android / iOS
     if (Capacitor.isNativePlatform()) {
       if (isNativeListeningRef.current) {
+        addDebugLog('STT:Start', 'Already listening natively, skipping start');
         console.log("[Native STT] Already listening natively, skipping duplicate start call");
         return;
       }
 
       try {
+        addDebugLog('STT:Start', 'Checking availability and permissions...');
         console.log("[Native STT:Start] Checking speech recognition availability...");
         const available = await CapSpeechRecognition.available();
+        addDebugLog('STT:Start', `available: ${available?.available}`);
         if (!available?.available) {
+          addDebugLog('STT:Start', 'Native speech recognition unavailable');
           console.warn("[Native STT:Start] Native speech recognition unavailable on device");
           toast.error("Device speech recognition engine not available");
           return;
         }
 
         const permStatus = await CapSpeechRecognition.checkPermissions();
+        addDebugLog('STT:Start', `permStatus: ${JSON.stringify(permStatus)}`);
         if (permStatus.speechRecognition !== 'granted') {
+          addDebugLog('STT:Start', 'Requesting speech recognition permissions...');
           console.log("[Native STT:Start] Requesting speech recognition permissions...");
           const reqStatus = await CapSpeechRecognition.requestPermissions();
+          addDebugLog('STT:Start', `reqStatus: ${JSON.stringify(reqStatus)}`);
           if (reqStatus.speechRecognition !== 'granted') {
+            addDebugLog('STT:Start', 'Microphone permission denied by user');
             console.warn("[Native STT:Start] Microphone permission denied by user");
             toast.error("Microphone permission required for speech recognition");
             return;
@@ -427,12 +466,15 @@ export default function LiveVoice() {
         await stopSpeechToText();
         currentTranscriptRef.current = '';
 
+        addDebugLog('STT:Start', 'Attaching partialResults and listeningState listeners...');
         console.log("[Native STT:Start] Attaching partialResults and listeningState listeners...");
 
         // Listen for partial and final result updates
         nativeListenerRef.current = await CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
+          addDebugLog('partialResults', `matches: ${JSON.stringify(data?.matches)}`);
           console.log("[Native STT:partialResults] Event received with matches:", data?.matches);
           if (isSpeakingRef.current || isRespondingRef.current) {
+            addDebugLog('partialResults', 'Ignored: currently speaking or responding');
             console.log("[Native STT:partialResults] Ignored: Sierra is currently speaking or responding");
             return;
           }
@@ -442,6 +484,7 @@ export default function LiveVoice() {
               currentTranscriptRef.current = topMatch;
               setUserSpeechDetected(true);
               consecutiveFailuresRef.current = 0;
+              addDebugLog('partialResults:Buffer', `Buffer updated: "${topMatch}"`);
               console.log("[Native STT:partialResults] Transcript buffer updated:", topMatch);
 
               // Reset silence debounce timer: commit utterance if user pauses for 1200ms
@@ -449,6 +492,7 @@ export default function LiveVoice() {
                 clearTimeout(silenceTimerRef.current);
               }
               silenceTimerRef.current = setTimeout(() => {
+                addDebugLog('STT:SilenceDebounce', `Silence timer fired (1200ms), committing utterance: "${topMatch}"`);
                 console.log("[Native STT:SilenceDebounce] Silence timer fired after speech. Finalizing utterance...");
                 commitCurrentUtterance();
               }, 1200);
@@ -458,6 +502,7 @@ export default function LiveVoice() {
 
         // Listen for native engine listening state transitions
         nativeStateListenerRef.current = await CapSpeechRecognition.addListener('listeningState', (data: { status: 'started' | 'stopped' }) => {
+          addDebugLog('listeningState', `status: "${data?.status}", currentBuffer: "${currentTranscriptRef.current}"`);
           console.log("[Native STT:listeningState] State changed to:", data?.status);
           if (data?.status === 'stopped') {
             console.log("[Native STT:listeningState] Native engine stopped. Current buffer:", currentTranscriptRef.current);
@@ -470,6 +515,7 @@ export default function LiveVoice() {
         });
 
         isNativeListeningRef.current = true;
+        addDebugLog('STT:Start', 'Calling CapSpeechRecognition.start({ language: "en-US", partialResults: true })');
         console.log("[Native STT:Start] Calling CapSpeechRecognition.start({ language: 'en-US', partialResults: true })...");
 
         // Maximum timeout per recognition attempt
@@ -478,6 +524,7 @@ export default function LiveVoice() {
         }
         recognitionTimeoutRef.current = setTimeout(async () => {
           recognitionTimeoutRef.current = null;
+          addDebugLog('STT:Timeout', `12s cycle timeout reached (buffer: "${currentTranscriptRef.current}")`);
           console.warn("[Native STT:Timeout] 12s recognition cycle timeout reached");
           if (currentTranscriptRef.current.trim()) {
             commitCurrentUtterance();
@@ -499,10 +546,12 @@ export default function LiveVoice() {
           partialResults: true,
         });
 
+        addDebugLog('STT:Start', `start() resolved with: ${JSON.stringify(result)}`);
         console.log("[Native STT:Start] CapSpeechRecognition.start resolved with result:", result);
 
         // If the platform returns matches directly in the start resolution
         if (result?.matches && result.matches.length > 0 && result.matches[0].trim()) {
+          addDebugLog('STT:Start', `Direct matches returned on resolve: "${result.matches[0]}"`);
           console.log("[Native STT:Start] Direct matches received upon resolve:", result.matches[0]);
           currentTranscriptRef.current = result.matches[0].trim();
         }
@@ -515,6 +564,7 @@ export default function LiveVoice() {
         }
         isNativeListeningRef.current = false;
         setUserSpeechDetected(false);
+        addDebugLog('STT:Error', `Exception: ${nativeErr?.message || JSON.stringify(nativeErr)}`);
         console.error("[Native STT:Error] CapSpeechRecognition.start caught exception:", nativeErr);
 
         if (currentTranscriptRef.current.trim()) {
@@ -580,6 +630,7 @@ export default function LiveVoice() {
 
         if (finalPhrase.trim()) {
           const userText = finalPhrase.trim();
+          addDebugLog('WebSTT:Result', `Captured final phrase: "${userText}"`);
           console.log("[Web STT:Result] Captured final phrase:", userText);
           setUserSpeechDetected(false);
           consecutiveFailuresRef.current = 0;
@@ -589,6 +640,7 @@ export default function LiveVoice() {
       };
 
       recognition.onerror = (event: any) => {
+        addDebugLog('WebSTT:Error', `error: ${event.error}`);
         if (event.error === 'no-speech' || event.error === 'audio-capture') {
           return;
         }
@@ -1037,6 +1089,49 @@ export default function LiveVoice() {
               <div ref={transcriptEndRef} />
             </div>
           )}
+        </div>
+
+        {/* Real-Time On-Screen Pipeline Diagnostics Output */}
+        <div className="bg-zinc-950/90 border border-amber-500/40 rounded-2xl p-3 shadow-xl backdrop-blur-md space-y-2 text-left">
+          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider pb-1 border-b border-zinc-800">
+            <div className="flex items-center gap-1.5 text-amber-400">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span>Pipeline Stage Debug Output</span>
+              <span className="text-zinc-500 font-mono text-[9px]">({debugLogs.length} events)</span>
+            </div>
+            <button
+              onClick={() => setDebugLogs([])}
+              className="text-[10px] text-zinc-400 hover:text-zinc-200 underline font-sans"
+            >
+              Clear
+            </button>
+          </div>
+
+          <div className="font-mono text-[10.5px] leading-relaxed max-h-40 overflow-y-auto space-y-1 pr-1 bg-black/40 p-2 rounded-xl border border-zinc-900">
+            {debugLogs.length === 0 ? (
+              <p className="text-zinc-500 italic py-2 text-center font-sans text-xs">
+                No pipeline events logged yet. Tap the orb to trigger speech recognition.
+              </p>
+            ) : (
+              debugLogs.map((log) => (
+                <div key={log.id} className="border-b border-zinc-900/80 pb-0.5">
+                  <span className="text-zinc-500">[{log.time}]</span>{' '}
+                  <span className={cn(
+                    "font-bold",
+                    log.stage.includes('Error') || log.stage.includes('Catch') ? "text-red-400" :
+                    log.stage.includes('partialResults') ? "text-cyan-300" :
+                    log.stage.includes('listeningState') ? "text-yellow-300" :
+                    log.stage.includes('commit') ? "text-emerald-400" :
+                    log.stage.includes('streamChat') ? "text-purple-300" : "text-amber-300"
+                  )}>
+                    [{log.stage}]
+                  </span>{' '}
+                  <span className="text-zinc-300 break-all">{log.detail}</span>
+                </div>
+              ))
+            )}
+            <div ref={debugScrollRef} />
+          </div>
         </div>
 
         <p className="text-center text-xs text-zinc-500">
