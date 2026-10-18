@@ -25,6 +25,12 @@ jobs:
             npm install
           fi
 
+      - name: Decode Debug Keystore
+        run: |
+          if [ -f android/app/debug.keystore.base64 ]; then
+            base64 -d android/app/debug.keystore.base64 > android/app/debug.keystore
+          fi
+
       - name: Run Lint and Unit Tests
         run: |
           npm run lint

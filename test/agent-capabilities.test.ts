@@ -156,7 +156,13 @@ test("Persistent Debug Signing Configuration in Android Gradle Build", async () 
   assert.ok(gradleBuild.includes("keyPassword 'android'"), "build.gradle must specify keyPassword");
   assert.ok(gradleBuild.includes("signingConfig signingConfigs.debug"), "buildTypes.debug must use signingConfigs.debug");
 
-  assert.ok(fs.existsSync("android/app/debug.keystore"), "android/app/debug.keystore must exist on disk");
-  const stats = fs.statSync("android/app/debug.keystore");
-  assert.ok(stats.size > 0, "debug.keystore must not be empty");
+  const keystoreExists = fs.existsSync("android/app/debug.keystore");
+  const base64Exists = fs.existsSync("android/app/debug.keystore.base64");
+  assert.ok(
+    keystoreExists || base64Exists,
+    "Either android/app/debug.keystore or android/app/debug.keystore.base64 must exist on disk"
+  );
+  const targetPath = keystoreExists ? "android/app/debug.keystore" : "android/app/debug.keystore.base64";
+  const stats = fs.statSync(targetPath);
+  assert.ok(stats.size > 0, `${targetPath} must not be empty`);
 });
