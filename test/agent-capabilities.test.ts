@@ -166,3 +166,38 @@ test("Persistent Debug Signing Configuration in Android Gradle Build", async () 
   const stats = fs.statSync(targetPath);
   assert.ok(stats.size > 0, `${targetPath} must not be empty`);
 });
+
+test("Voice Debug Log Export and Formatting Pipeline", async () => {
+  const { formatDebugLogs } = await import("../src/lib/debugLogs");
+
+  // 1. Verify empty log format
+  const emptyFormatted = formatDebugLogs([]);
+  assert.strictEqual(emptyFormatted, "No pipeline events recorded yet.");
+
+  // 2. Build 30 chronological mock debug events
+  const mockLogs = Array.from({ length: 30 }, (_, i) => ({
+    id: `log-${i}`,
+    time: `10:00:${i < 10 ? '0' + i : i} AM`,
+    stage: i % 2 === 0 ? 'STT:Start' : 'partialResults',
+    detail: `Sample diagnostic detail message ${i + 1}`,
+  }));
+
+  // 3. Test full log export
+  const fullExport = formatDebugLogs(mockLogs);
+  const fullLines = fullExport.split("\n");
+  assert.strictEqual(fullLines.length, 30);
+  assert.strictEqual(fullLines[0], "[10:00:00 AM] [STT:Start] Sample diagnostic detail message 1");
+  assert.strictEqual(fullLines[29], "[10:00:29 AM] [partialResults] Sample diagnostic detail message 30");
+
+  // 4. Test Last 20 Events export
+  const last20Export = formatDebugLogs(mockLogs, 20);
+  const last20Lines = last20Export.split("\n");
+  assert.strictEqual(last20Lines.length, 20);
+  assert.strictEqual(last20Lines[0], "[10:00:10 AM] [STT:Start] Sample diagnostic detail message 11");
+  assert.strictEqual(last20Lines[19], "[10:00:29 AM] [partialResults] Sample diagnostic detail message 30");
+
+  // 5. Verify @capacitor/clipboard dependency in package.json
+  const fs = await import("node:fs");
+  const pkg = JSON.parse(fs.readFileSync("package.json", "utf-8"));
+  assert.ok(pkg.dependencies["@capacitor/clipboard"], "@capacitor/clipboard must be present in dependencies");
+});

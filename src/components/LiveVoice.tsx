@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { Clipboard } from '@capacitor/clipboard';
 import { SpeechRecognition as CapSpeechRecognition } from '@capacitor-community/speech-recognition';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
 import { Button } from './ui/button';
-import { Mic, MicOff, Loader2, Sparkles, AlertCircle, RefreshCw, Volume2, MessageSquare } from 'lucide-react';
+import { 
+  Mic, MicOff, Loader2, Sparkles, AlertCircle, RefreshCw, Volume2, MessageSquare,
+  Copy, FileText, Trash2, Check, X, AlertTriangle
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { toast } from 'sonner';
@@ -19,6 +23,9 @@ interface TranscriptItem {
   timestamp: number;
 }
 
+import { formatDebugLogs, type DebugLogEvent } from '../lib/debugLogs';
+export { formatDebugLogs, type DebugLogEvent };
+
 export default function LiveVoice() {
   const [user] = useAuthState(auth);
   const [isActive, setIsActive] = useState(false);
@@ -31,6 +38,11 @@ export default function LiveVoice() {
   const [userSpeechDetected, setUserSpeechDetected] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState<'Aoede' | 'Zephyr' | 'Kore' | 'Puck'>('Aoede');
   const [debugLogs, setDebugLogs] = useState<{ id: string; time: string; stage: string; detail: string }[]>([]);
+  const [isCopied, setIsCopied] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [isFallbackModalOpen, setIsFallbackModalOpen] = useState(false);
+  const [fallbackLogText, setFallbackLogText] = useState('');
+  const fallbackTextareaRef = useRef<HTMLTextAreaElement>(null);
   const debugScrollRef = useRef<HTMLDivElement>(null);
 
   const addDebugLog = (stage: string, detail: string) => {
@@ -84,6 +96,78 @@ export default function LiveVoice() {
   useEffect(() => {
     debugScrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [debugLogs]);
+
+  useEffect(() => {
+    if (isFallbackModalOpen && fallbackTextareaRef.current) {
+      fallbackTextareaRef.current.focus();
+      fallbackTextareaRef.current.select();
+    }
+  }, [isFallbackModalOpen]);
+
+  const copyDebugLogs = async (count?: number) => {
+    if (debugLogs.length === 0) {
+      toast.info("No debug events logged yet. Speak or tap the orb first.");
+      return;
+    }
+
+    const textToCopy = formatDebugLogs(debugLogs, count);
+    let copied = false;
+
+    // 1. Native Capacitor Clipboard
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await Clipboard.write({ string: textToCopy });
+        copied = true;
+      } catch (nativeErr: any) {
+        console.warn("[Clipboard] Capacitor Clipboard.write failed, falling back:", nativeErr);
+      }
+    }
+
+    // 2. Browser Navigator Clipboard API
+    if (!copied && typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        copied = true;
+      } catch (webErr: any) {
+        console.warn("[Clipboard] navigator.clipboard.writeText failed:", webErr);
+      }
+    }
+
+    // 3. Fallback: execCommand('copy') with off-screen textarea
+    if (!copied && typeof document !== 'undefined') {
+      try {
+        const tempTextArea = document.createElement('textarea');
+        tempTextArea.value = textToCopy;
+        tempTextArea.style.position = 'fixed';
+        tempTextArea.style.left = '-9999px';
+        tempTextArea.style.top = '0';
+        tempTextArea.setAttribute('readonly', '');
+        document.body.appendChild(tempTextArea);
+        tempTextArea.focus();
+        tempTextArea.select();
+        copied = document.execCommand('copy');
+        document.body.removeChild(tempTextArea);
+      } catch (execErr: any) {
+        console.warn("[Clipboard] document.execCommand('copy') failed:", execErr);
+      }
+    }
+
+    if (copied) {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+      toast.success("Debug log copied. Paste it into ChatGPT.");
+    } else {
+      toast.error("Could not write to clipboard automatically. Select and copy from the box below.");
+      setFallbackLogText(textToCopy);
+      setIsFallbackModalOpen(true);
+    }
+  };
+
+  const handleClearConfirm = () => {
+    setDebugLogs([]);
+    setShowClearConfirm(false);
+    toast.info("Debug log cleared.");
+  };
 
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -1200,19 +1284,35 @@ export default function LiveVoice() {
         </div>
 
         {/* Real-Time On-Screen Pipeline Diagnostics Output */}
-        <div className="bg-zinc-950/90 border border-amber-500/40 rounded-2xl p-3 shadow-xl backdrop-blur-md space-y-2 text-left">
-          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider pb-1 border-b border-zinc-800">
+        <div className="bg-zinc-950/90 border border-amber-500/40 rounded-2xl p-3 shadow-xl backdrop-blur-md space-y-2.5 text-left">
+          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider pb-1.5 border-b border-zinc-800">
             <div className="flex items-center gap-1.5 text-amber-400">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
               <span>Pipeline Stage Debug Output</span>
               <span className="text-zinc-500 font-mono text-[9px]">({debugLogs.length} events)</span>
             </div>
-            <button
-              onClick={() => setDebugLogs([])}
-              className="text-[10px] text-zinc-400 hover:text-zinc-200 underline font-sans"
-            >
-              Clear
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFallbackLogText(formatDebugLogs(debugLogs));
+                  setIsFallbackModalOpen(true);
+                }}
+                disabled={debugLogs.length === 0}
+                className="text-[10px] text-zinc-400 hover:text-zinc-200 underline font-sans flex items-center gap-1 disabled:opacity-30 disabled:no-underline"
+              >
+                <FileText className="w-3 h-3" />
+                <span>View Text</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(true)}
+                disabled={debugLogs.length === 0}
+                className="text-[10px] text-zinc-400 hover:text-red-300 underline font-sans disabled:opacity-30 disabled:no-underline"
+              >
+                Clear
+              </button>
+            </div>
           </div>
 
           <div className="font-mono text-[10.5px] leading-relaxed max-h-40 overflow-y-auto space-y-1 pr-1 bg-black/40 p-2 rounded-xl border border-zinc-900">
@@ -1240,7 +1340,161 @@ export default function LiveVoice() {
             )}
             <div ref={debugScrollRef} />
           </div>
+
+          {/* Clear confirmation prompt */}
+          {showClearConfirm && (
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-red-950/70 border border-red-500/50 rounded-xl text-xs">
+              <div className="flex items-center gap-1.5 text-red-200 font-medium">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>Clear all {debugLogs.length} events?</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleClearConfirm}
+                  className="min-h-[48px] px-3.5 py-2 bg-red-600 hover:bg-red-500 active:bg-red-700 text-white rounded-lg font-semibold text-xs flex items-center justify-center transition-all active:scale-95 shadow-sm"
+                >
+                  Yes, Clear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowClearConfirm(false)}
+                  className="min-h-[48px] px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-750 text-zinc-300 rounded-lg text-xs flex items-center justify-center transition-all active:scale-95"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Diagnostic Export and Management Actions */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => copyDebugLogs()}
+              disabled={debugLogs.length === 0}
+              className={cn(
+                "min-h-[48px] px-3 py-2.5 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm",
+                debugLogs.length === 0
+                  ? "bg-zinc-900/50 border border-zinc-800 text-zinc-600 cursor-not-allowed"
+                  : "bg-amber-500/20 hover:bg-amber-500/30 active:bg-amber-500/40 border border-amber-500/50 text-amber-300"
+              )}
+              title="Copy all debug events to clipboard"
+            >
+              {isCopied ? (
+                <>
+                  <Check className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <span className="text-emerald-300">Copied!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>Copy Debug Log</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => copyDebugLogs(20)}
+              disabled={debugLogs.length === 0}
+              className={cn(
+                "min-h-[48px] px-3 py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-2 transition-all active:scale-95",
+                debugLogs.length === 0
+                  ? "bg-zinc-900/50 border border-zinc-800 text-zinc-600 cursor-not-allowed"
+                  : "bg-zinc-900 hover:bg-zinc-800 active:bg-zinc-750 border border-zinc-700/60 text-zinc-200"
+              )}
+              title="Copy the most recent 20 events"
+            >
+              <FileText className="w-4 h-4 shrink-0 text-zinc-400" />
+              <span>Copy Last 20</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowClearConfirm(true)}
+              disabled={debugLogs.length === 0}
+              className={cn(
+                "min-h-[48px] px-3 py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-2 transition-all active:scale-95",
+                debugLogs.length === 0
+                  ? "bg-zinc-900/50 border border-zinc-800 text-zinc-600 cursor-not-allowed"
+                  : "bg-zinc-900 hover:bg-red-950/40 active:bg-red-950/60 border border-zinc-800 hover:border-red-500/40 text-zinc-400 hover:text-red-300"
+              )}
+              title="Clear all recorded events"
+            >
+              <Trash2 className="w-4 h-4 shrink-0" />
+              <span>Clear Debug Log</span>
+            </button>
+          </div>
         </div>
+
+        {/* Selectable-Text Fallback Modal Dialog */}
+        {isFallbackModalOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4"
+          >
+            <div className="bg-zinc-900 border border-zinc-700/80 rounded-2xl w-full max-w-lg p-4 shadow-2xl flex flex-col max-h-[85vh] space-y-3 animate-in fade-in zoom-in-95">
+              <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+                    <Copy className="w-4 h-4 text-amber-400" />
+                    Diagnostic Debug Log
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Select all and copy to paste into ChatGPT:
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsFallbackModalOpen(false)}
+                  className="min-h-[48px] min-w-[48px] p-2 flex items-center justify-center text-zinc-400 hover:text-white rounded-lg active:bg-zinc-800"
+                  aria-label="Close dialog"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <textarea
+                ref={fallbackTextareaRef}
+                readOnly
+                value={fallbackLogText}
+                onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+                className="flex-1 w-full min-h-[220px] font-mono text-[11px] leading-relaxed bg-black/90 text-zinc-200 p-3 rounded-xl border border-zinc-800 focus:outline-none focus:ring-1 focus:ring-amber-500 select-all resize-none"
+              />
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (fallbackTextareaRef.current) {
+                      fallbackTextareaRef.current.focus();
+                      fallbackTextareaRef.current.select();
+                      try {
+                        document.execCommand('copy');
+                        toast.success("Debug log copied. Paste it into ChatGPT.");
+                      } catch (_) {
+                        toast.info("Text selected! Use your device's copy option.");
+                      }
+                    }
+                  }}
+                  className="min-h-[48px] px-4 py-2 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-black font-semibold text-xs rounded-xl flex items-center gap-2 active:scale-95 transition-all shadow-sm"
+                >
+                  <Copy className="w-4 h-4" />
+                  Select & Copy All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsFallbackModalOpen(false)}
+                  className="min-h-[48px] px-4 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-750 text-zinc-200 text-xs font-medium rounded-xl active:scale-95 transition-all"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <p className="text-center text-xs text-zinc-500">
           {isConnecting ? "Connecting to Sierra neural model..." : 
