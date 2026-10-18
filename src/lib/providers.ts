@@ -28,20 +28,50 @@ const STORAGE_KEY_ACTIVE = 'omni_active_provider';
 const STORAGE_KEY_KEYS = 'omni_provider_keys';
 
 function getNativeStoredKeys(): Record<string, string> {
+  const result: Record<string, string> = {};
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_KEYS) : null;
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+    if (typeof localStorage !== 'undefined') {
+      // 1. Read directly from the primary persistent storage (STORAGE_KEY_CONFIG)
+      // where model and provider configurations reside
+      const rawConfig = localStorage.getItem(STORAGE_KEY_CONFIG);
+      if (rawConfig) {
+        const parsed = JSON.parse(rawConfig);
+        for (const [id, conf] of Object.entries(parsed as Record<string, any>)) {
+          if (conf?.apiKey) {
+            result[id] = conf.apiKey;
+          }
+        }
+      }
+      // 2. Check legacy / auxiliary keys storage
+      const rawKeys = localStorage.getItem(STORAGE_KEY_KEYS);
+      if (rawKeys) {
+        const parsedKeys = JSON.parse(rawKeys);
+        for (const [id, key] of Object.entries(parsedKeys as Record<string, string>)) {
+          if (key && !result[id]) {
+            result[id] = key;
+          }
+        }
+      }
+    }
+  } catch {}
+  return result;
 }
 
 function saveNativeStoredKey(providerId: string, apiKey: string) {
   try {
     if (typeof localStorage === 'undefined') return;
-    const keys = getNativeStoredKeys();
-    keys[providerId] = apiKey;
-    localStorage.setItem(STORAGE_KEY_KEYS, JSON.stringify(keys));
+    // Persist to the same on-device storage key (STORAGE_KEY_CONFIG) as model selection
+    const rawConfig = localStorage.getItem(STORAGE_KEY_CONFIG);
+    const configMap: Record<string, any> = rawConfig ? JSON.parse(rawConfig) : {};
+    if (!configMap[providerId]) configMap[providerId] = {};
+    configMap[providerId].apiKey = apiKey;
+    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(configMap));
+
+    // Mirror to auxiliary keys storage for compatibility
+    const rawKeys = localStorage.getItem(STORAGE_KEY_KEYS);
+    const keysMap: Record<string, string> = rawKeys ? JSON.parse(rawKeys) : {};
+    keysMap[providerId] = apiKey;
+    localStorage.setItem(STORAGE_KEY_KEYS, JSON.stringify(keysMap));
   } catch {}
 }
 
@@ -186,14 +216,16 @@ export async function saveProviderConfig(data: {
         localStorage.setItem(STORAGE_KEY_ACTIVE, active);
       }
       if (data.providerId) {
-        if (data.apiKey) {
-          saveNativeStoredKey(data.providerId, data.apiKey);
-        }
         const rawConfig = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY_CONFIG) : null;
         const configMap: Record<string, any> = rawConfig ? JSON.parse(rawConfig) : {};
         if (!configMap[data.providerId]) configMap[data.providerId] = {};
         if (data.model !== undefined) configMap[data.providerId].selectedModel = data.model;
         if (data.baseUrl !== undefined) configMap[data.providerId].baseUrl = data.baseUrl;
+        // Save the API key to the exact same persistent on-device storage object as the other settings
+        if (data.apiKey !== undefined && data.apiKey.trim() !== '') {
+          configMap[data.providerId].apiKey = data.apiKey.trim();
+          saveNativeStoredKey(data.providerId, data.apiKey.trim());
+        }
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(configMap));
         }

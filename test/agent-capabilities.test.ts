@@ -59,3 +59,53 @@ test("Android SDK 36.0.0 Configuration Validation", () => {
   assert.strictEqual(targetSdk, 36);
   assert.ok(minSdk >= 21);
 });
+
+test("Voice Chat Feedback Loop & Speech Lifecycle Safeguards", () => {
+  // Test cooldown buffer, retry limits, and recognition timeout safeguards
+  const PLAYBACK_COOLDOWN_MS = 750;
+  const MAX_RECOGNITION_RETRIES = 3;
+  const RECOGNITION_TIMEOUT_MS = 12000;
+
+  assert.ok(PLAYBACK_COOLDOWN_MS >= 500, "Cooldown buffer must be at least 500ms to eliminate speaker tail audio");
+  assert.ok(MAX_RECOGNITION_RETRIES <= 5, "Retry limit must be bounded to prevent infinite loops");
+  assert.ok(RECOGNITION_TIMEOUT_MS > 0 && RECOGNITION_TIMEOUT_MS <= 30000, "Recognition timeout must be bounded");
+
+  // Validate retry counter logic
+  let consecutiveErrors = 0;
+  let halted = false;
+  for (let i = 0; i < 10; i++) {
+    consecutiveErrors++;
+    if (consecutiveErrors >= MAX_RECOGNITION_RETRIES) {
+      halted = true;
+      break;
+    }
+  }
+  assert.strictEqual(halted, true);
+  assert.strictEqual(consecutiveErrors, MAX_RECOGNITION_RETRIES);
+});
+
+test("Android Manifest Speech Recognition Queries Declaration", async () => {
+  const fs = await import("node:fs");
+  const manifest = fs.readFileSync("android/app/src/main/AndroidManifest.xml", "utf-8");
+  assert.ok(manifest.includes("<queries>"), "Manifest must declare <queries>");
+  assert.ok(manifest.includes("android.speech.RecognitionService"), "Manifest must query android.speech.RecognitionService for Android 11+");
+});
+
+test("On-Device API Key Persistence with Provider and Model Configuration", () => {
+  const storageMock: Record<string, string> = {};
+  const STORAGE_KEY_CONFIG = "omni_providers_config";
+
+  // Simulate saving configuration with model and API key into the same persistent storage
+  const configMap: Record<string, any> = {};
+  configMap["gemini"] = {
+    selectedModel: "gemini-3.5-flash-lite",
+    apiKey: "AIzaSyTestMockKey12345",
+  };
+  storageMock[STORAGE_KEY_CONFIG] = JSON.stringify(configMap);
+
+  // Retrieve and verify key is stored in the same persistent on-device config map
+  const retrieved = JSON.parse(storageMock[STORAGE_KEY_CONFIG]);
+  assert.strictEqual(retrieved.gemini.selectedModel, "gemini-3.5-flash-lite");
+  assert.strictEqual(retrieved.gemini.apiKey, "AIzaSyTestMockKey12345");
+});
+

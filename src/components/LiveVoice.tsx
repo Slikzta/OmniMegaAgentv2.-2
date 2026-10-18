@@ -46,6 +46,13 @@ export default function LiveVoice() {
   const isRespondingRef = useRef<boolean>(false);
   const isActiveRef = useRef<boolean>(false);
   const transcriptsRef = useRef<TranscriptItem[]>([]);
+  const cooldownTimerRef = useRef<any>(null);
+  const retryTimerRef = useRef<any>(null);
+  const recognitionTimeoutRef = useRef<any>(null);
+  const consecutiveFailuresRef = useRef<number>(0);
+  const MAX_RECOGNITION_RETRIES = 3;
+  const RECOGNITION_TIMEOUT_MS = 12000;
+  const PLAYBACK_COOLDOWN_MS = 750;
 
   // Keep refs synchronized with state
   useEffect(() => {
@@ -88,11 +95,27 @@ export default function LiveVoice() {
     }
   };
 
-  const playTextToSpeech = (text: string) => {
+  const scheduleListeningRestart = (delayMs: number = PLAYBACK_COOLDOWN_MS) => {
+    if (cooldownTimerRef.current) {
+      clearTimeout(cooldownTimerRef.current);
+    }
+    cooldownTimerRef.current = setTimeout(() => {
+      cooldownTimerRef.current = null;
+      if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
+        startSpeechToText();
+      }
+    }, delayMs);
+  };
+
+  const playTextToSpeech = async (text: string) => {
     if (!text.trim()) return;
+
+    // Properly stop and fully release native speech recognition plugin before TTS playback begins
+    await stopSpeechToText();
+
     if (typeof window === 'undefined' || !window.speechSynthesis) {
       if (isActiveRef.current && mode === 'continuous') {
-        startSpeechToText();
+        scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
       }
       return;
     }
@@ -126,9 +149,10 @@ export default function LiveVoice() {
       utterance.onend = () => {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
-        // Resume continuous listening after Sierra finishes speaking
+        // Resume continuous listening ONLY after playback fully completes, with a short cooldown buffer
+        // to avoid catching playback tail audio from the device speaker
         if (isActiveRef.current && mode === 'continuous') {
-          startSpeechToText();
+          scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
         }
       };
 
@@ -137,7 +161,7 @@ export default function LiveVoice() {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         if (isActiveRef.current && mode === 'continuous') {
-          startSpeechToText();
+          scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
         }
       };
 
@@ -147,7 +171,7 @@ export default function LiveVoice() {
       setIsSpeaking(false);
       isSpeakingRef.current = false;
       if (isActiveRef.current && mode === 'continuous') {
-        startSpeechToText();
+        scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
       }
     }
   };
@@ -177,8 +201,8 @@ export default function LiveVoice() {
 
     let accumulatedText = '';
 
-    // Stop STT while model is thinking/speaking to avoid picking up speaker output
-    stopSpeechToText();
+    // Stop and fully release STT while model is thinking/speaking to avoid picking up speaker output
+    await stopSpeechToText();
 
     try {
       const history = transcriptsRef.current.slice(-6).map(t => ({
@@ -199,15 +223,15 @@ export default function LiveVoice() {
           // Render streamed response into transcript UI
           setTranscripts(prev => prev.map(item => item.id === sierraId ? { ...item, text: accumulatedText } : item));
         },
-        onDone: () => {
+        onDone: async () => {
           isRespondingRef.current = false;
           if (accumulatedText.trim()) {
             persistVoiceMessage('sierra', accumulatedText.trim());
-            // 4. Trigger Text-to-Speech playback for the response
-            playTextToSpeech(accumulatedText.trim());
+            // 4. Trigger Text-to-Speech playback for the response (releases STT and enforces cooldown)
+            await playTextToSpeech(accumulatedText.trim());
           } else {
             if (isActiveRef.current && mode === 'continuous') {
-              startSpeechToText();
+              scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
             }
           }
         },
@@ -216,7 +240,7 @@ export default function LiveVoice() {
           console.error("Continuous voice stream error:", err);
           toast.error(`Voice error: ${err.message}`);
           if (isActiveRef.current && mode === 'continuous') {
-            startSpeechToText();
+            scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
           }
         }
       });
@@ -224,7 +248,7 @@ export default function LiveVoice() {
       isRespondingRef.current = false;
       toast.error(`Failed to generate voice response: ${err.message}`);
       if (isActiveRef.current && mode === 'continuous') {
-        startSpeechToText();
+        scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
       }
     }
   };
@@ -261,6 +285,7 @@ export default function LiveVoice() {
       isActiveRef.current = true;
       setIsConnecting(false);
       setConnectionError(null);
+      consecutiveFailuresRef.current = 0;
       startSpeechToText();
       toast.success("Sierra is listening!");
     } catch (error: any) {
@@ -280,6 +305,20 @@ export default function LiveVoice() {
     setIsSpeaking(false);
     isSpeakingRef.current = false;
     setUserSpeechDetected(false);
+    consecutiveFailuresRef.current = 0;
+
+    if (cooldownTimerRef.current) {
+      clearTimeout(cooldownTimerRef.current);
+      cooldownTimerRef.current = null;
+    }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (recognitionTimeoutRef.current) {
+      clearTimeout(recognitionTimeoutRef.current);
+      recognitionTimeoutRef.current = null;
+    }
 
     if (sessionRef.current) {
       try {
@@ -296,8 +335,16 @@ export default function LiveVoice() {
   };
 
   const startSpeechToText = async () => {
+    if (!isActiveRef.current || isSpeakingRef.current || isRespondingRef.current) {
+      return;
+    }
+
     // 1. Native Capacitor Speech Recognition on Android / iOS
     if (Capacitor.isNativePlatform()) {
+      if (isNativeListeningRef.current) {
+        return;
+      }
+
       try {
         const available = await CapSpeechRecognition.available();
         if (!available?.available) {
@@ -315,13 +362,8 @@ export default function LiveVoice() {
           }
         }
 
-        // Clean up previous listener
-        if (nativeListenerRef.current) {
-          try {
-            await nativeListenerRef.current.remove();
-          } catch (_) {}
-          nativeListenerRef.current = null;
-        }
+        // Clean up previous listeners and release any lingering session before starting
+        await stopSpeechToText();
 
         // Listen for partial results to update speech detection indicator
         nativeListenerRef.current = await CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
@@ -333,6 +375,19 @@ export default function LiveVoice() {
 
         isNativeListeningRef.current = true;
 
+        // Set maximum timeout per recognition cycle
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+        }
+        recognitionTimeoutRef.current = setTimeout(async () => {
+          recognitionTimeoutRef.current = null;
+          if (isNativeListeningRef.current) {
+            try {
+              await CapSpeechRecognition.stop();
+            } catch (_) {}
+          }
+        }, RECOGNITION_TIMEOUT_MS);
+
         const result = await CapSpeechRecognition.start({
           language: 'en-US',
           maxResults: 1,
@@ -341,29 +396,48 @@ export default function LiveVoice() {
           partialResults: true,
         });
 
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+          recognitionTimeoutRef.current = null;
+        }
+
         isNativeListeningRef.current = false;
         setUserSpeechDetected(false);
 
         const recognizedText = result?.matches?.[0] || '';
         if (recognizedText.trim() && !isSpeakingRef.current && !isRespondingRef.current) {
-          handleUserUtterance(recognizedText.trim());
+          // Success: reset failures counter
+          consecutiveFailuresRef.current = 0;
+          await handleUserUtterance(recognizedText.trim());
         } else {
-          // If no utterance was recognized, restart listening in continuous mode
+          // Empty or silent capture: retry with limit
           if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
-            startSpeechToText();
+            consecutiveFailuresRef.current++;
+            if (consecutiveFailuresRef.current >= MAX_RECOGNITION_RETRIES) {
+              console.warn("Continuous recognition paused: max retry limit reached.");
+              return;
+            }
+            scheduleListeningRestart(500);
           }
         }
         return;
       } catch (nativeErr: any) {
+        if (recognitionTimeoutRef.current) {
+          clearTimeout(recognitionTimeoutRef.current);
+          recognitionTimeoutRef.current = null;
+        }
         isNativeListeningRef.current = false;
         setUserSpeechDetected(false);
         console.warn("Capacitor speech recognition error:", nativeErr);
+
         if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
-          setTimeout(() => {
-            if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current) {
-              startSpeechToText();
-            }
-          }, 400);
+          consecutiveFailuresRef.current++;
+          if (consecutiveFailuresRef.current >= MAX_RECOGNITION_RETRIES) {
+            console.warn("Continuous recognition halted: max retry limit reached.");
+            return;
+          }
+          const backoff = 600 * consecutiveFailuresRef.current;
+          scheduleListeningRestart(backoff);
         }
         return;
       }
@@ -412,6 +486,7 @@ export default function LiveVoice() {
         if (finalPhrase.trim()) {
           const userText = finalPhrase.trim();
           setUserSpeechDetected(false);
+          consecutiveFailuresRef.current = 0;
           handleUserUtterance(userText);
         }
       };
@@ -424,11 +499,9 @@ export default function LiveVoice() {
       };
 
       recognition.onend = () => {
-        // In continuous mode, if still active and not speaking, keep listening
+        // In continuous mode, if still active and not speaking, keep listening with cooldown
         if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
-          try {
-            recognition.start();
-          } catch (_) {}
+          scheduleListeningRestart(400);
         }
       };
 
@@ -440,6 +513,19 @@ export default function LiveVoice() {
   };
 
   const stopSpeechToText = async () => {
+    if (cooldownTimerRef.current) {
+      clearTimeout(cooldownTimerRef.current);
+      cooldownTimerRef.current = null;
+    }
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    if (recognitionTimeoutRef.current) {
+      clearTimeout(recognitionTimeoutRef.current);
+      recognitionTimeoutRef.current = null;
+    }
+
     if (Capacitor.isNativePlatform()) {
       isNativeListeningRef.current = false;
       if (nativeListenerRef.current) {
@@ -449,6 +535,9 @@ export default function LiveVoice() {
         nativeListenerRef.current = null;
       }
       try {
+        await CapSpeechRecognition.removeAllListeners();
+      } catch (_) {}
+      try {
         await CapSpeechRecognition.stop();
       } catch (_) {}
       return;
@@ -456,7 +545,7 @@ export default function LiveVoice() {
 
     if (speechRecognitionRef.current) {
       try {
-        speechRecognitionRef.current.stop();
+        speechRecognitionRef.current.abort();
       } catch (e) {
         // ignore
       }
