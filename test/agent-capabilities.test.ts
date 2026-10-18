@@ -109,3 +109,54 @@ test("On-Device API Key Persistence with Provider and Model Configuration", () =
   assert.strictEqual(retrieved.gemini.apiKey, "AIzaSyTestMockKey12345");
 });
 
+test("Native CapSpeechRecognition Partial Results and Utterance Handoff Pipeline", () => {
+  let currentTranscript = "";
+  let userSpeechDetected = false;
+  let committedUtterance = "";
+
+  const onPartialResults = (data: { matches: string[] }) => {
+    if (data?.matches && data.matches.length > 0) {
+      const topMatch = data.matches[0].trim();
+      if (topMatch) {
+        currentTranscript = topMatch;
+        userSpeechDetected = true;
+      }
+    }
+  };
+
+  const commitUtterance = () => {
+    committedUtterance = currentTranscript.trim();
+    currentTranscript = "";
+    userSpeechDetected = false;
+  };
+
+  // Simulate partial results incoming from native speech recognition
+  onPartialResults({ matches: ["Hello"] });
+  assert.strictEqual(userSpeechDetected, true);
+  assert.strictEqual(currentTranscript, "Hello");
+
+  onPartialResults({ matches: ["Hello Sierra how are you"] });
+  assert.strictEqual(currentTranscript, "Hello Sierra how are you");
+
+  // Simulate end of speech / silence commit
+  commitUtterance();
+  assert.strictEqual(committedUtterance, "Hello Sierra how are you");
+  assert.strictEqual(currentTranscript, "");
+  assert.strictEqual(userSpeechDetected, false);
+});
+
+test("Persistent Debug Signing Configuration in Android Gradle Build", async () => {
+  const fs = await import("node:fs");
+  const gradleBuild = fs.readFileSync("android/app/build.gradle", "utf-8");
+
+  assert.ok(gradleBuild.includes("signingConfigs"), "build.gradle must configure signingConfigs");
+  assert.ok(gradleBuild.includes("storeFile file('debug.keystore')"), "build.gradle must specify fixed debug.keystore storeFile");
+  assert.ok(gradleBuild.includes("keyAlias 'androiddebugkey'"), "build.gradle must specify consistent androiddebugkey keyAlias");
+  assert.ok(gradleBuild.includes("storePassword 'android'"), "build.gradle must specify storePassword");
+  assert.ok(gradleBuild.includes("keyPassword 'android'"), "build.gradle must specify keyPassword");
+  assert.ok(gradleBuild.includes("signingConfig signingConfigs.debug"), "buildTypes.debug must use signingConfigs.debug");
+
+  assert.ok(fs.existsSync("android/app/debug.keystore"), "android/app/debug.keystore must exist on disk");
+  const stats = fs.statSync("android/app/debug.keystore");
+  assert.ok(stats.size > 0, "debug.keystore must not be empty");
+});

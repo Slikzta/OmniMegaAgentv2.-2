@@ -15,3 +15,6 @@ android/build/
 *.aab
 *.keystore
 *.jks
+!**/debug.keystore
+!**/debug.keystore.base64
+

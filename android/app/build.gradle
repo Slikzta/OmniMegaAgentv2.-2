@@ -22,7 +22,26 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        debug {
+            def keystoreFile = file('debug.keystore')
+            if (!keystoreFile.exists()) {
+                def b64File = file('debug.keystore.base64')
+                if (b64File.exists()) {
+                    keystoreFile.bytes = b64File.text.trim().decodeBase64()
+                }
+            }
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
