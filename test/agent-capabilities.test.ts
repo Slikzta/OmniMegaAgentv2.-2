@@ -242,13 +242,13 @@ test("Recognition Session Lifecycle: Delayed Stop and Timeout Protection", async
   // Simulate native stop that hangs indefinitely without calling resolve
   const hangingNativeStop = () => new Promise<void>(() => {});
 
-  const withNativeTimeout = async <T>(
+  const withNativeTimeout = async <T, F = T>(
     promise: Promise<T>,
     ms: number = 50,
-    fallbackValue?: T
-  ): Promise<T | undefined> => {
+    fallbackValue?: F
+  ): Promise<T | F | undefined> => {
     let timeoutId: any = null;
-    const timeoutPromise = new Promise<T | undefined>((resolve) => {
+    const timeoutPromise = new Promise<F | undefined>((resolve) => {
       timeoutId = setTimeout(() => resolve(fallbackValue), ms);
     });
     try {
