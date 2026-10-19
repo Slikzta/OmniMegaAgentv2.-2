@@ -384,3 +384,42 @@ test("Native Patch Integrity: SpeechRecognition.java Patch and Backup Verificati
   );
 });
 
+test("Native Text-to-Speech Integration and Lifecycle Contracts", async () => {
+  const fs = await import("node:fs");
+  const liveVoiceContent = fs.readFileSync("src/components/LiveVoice.tsx", "utf-8");
+
+  // Verify plugin import and speak invocation
+  assert.ok(
+    liveVoiceContent.includes("import { TextToSpeech } from '@capacitor-community/text-to-speech';"),
+    "LiveVoice.tsx must import TextToSpeech from @capacitor-community/text-to-speech"
+  );
+  assert.ok(
+    liveVoiceContent.includes("TextToSpeech.speak("),
+    "LiveVoice.tsx must invoke TextToSpeech.speak()"
+  );
+
+  // Verify 15-second timeout race
+  assert.ok(
+    liveVoiceContent.includes("15000"),
+    "Native TTS must employ a 15-second timeout safeguard"
+  );
+
+  // Verify debug logging for all 4 stages
+  assert.ok(liveVoiceContent.includes("addDebugLog('TTS:Start'"), "Must log TTS:Start");
+  assert.ok(liveVoiceContent.includes("addDebugLog('TTS:Finished'"), "Must log TTS:Finished");
+  assert.ok(liveVoiceContent.includes("addDebugLog('TTS:Timeout'"), "Must log TTS:Timeout");
+  assert.ok(liveVoiceContent.includes("addDebugLog('TTS:Error'"), "Must log TTS:Error");
+
+  // Verify STT cleanup before TTS
+  assert.ok(
+    liveVoiceContent.includes("await withNativeTimeout(stopSpeechToText(),"),
+    "stopSpeechToText() must be protected by timeout pattern before TTS starts"
+  );
+
+  // Verify scheduleListeningRestart is called in finally
+  assert.ok(
+    liveVoiceContent.includes("scheduleListeningRestart();"),
+    "scheduleListeningRestart must be called after TTS resolves or fails"
+  );
+});
+

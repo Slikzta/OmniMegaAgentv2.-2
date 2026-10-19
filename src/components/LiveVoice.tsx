@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Clipboard } from '@capacitor/clipboard';
 import { SpeechRecognition as CapSpeechRecognition } from '@capacitor-community/speech-recognition';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
@@ -255,8 +256,57 @@ export default function LiveVoice() {
     if (!text.trim()) return;
 
     // Properly stop and fully release native speech recognition plugin before TTS playback begins
-    await stopSpeechToText();
+    await withNativeTimeout(stopSpeechToText(), 2000, undefined, 'stopSpeechToText()');
 
+    // Clean markdown symbols for natural TTS speech
+    const cleanText = text.replace(/[*#_`~>]/g, '').trim();
+    if (!cleanText) return;
+
+    // 1. Native Capacitor Text-to-Speech on Android / iOS
+    if (Capacitor.isNativePlatform()) {
+      setIsSpeaking(true);
+      isSpeakingRef.current = true;
+      addDebugLog('TTS:Start', `Starting native TextToSpeech.speak() (${cleanText.length} chars)`);
+      console.log("[Native TTS:Start] Starting speak:", cleanText);
+
+      let didTimeout = false;
+      let timer: any = null;
+      const timeoutPromise = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => {
+          didTimeout = true;
+          addDebugLog('TTS:Timeout', 'Native TextToSpeech.speak() timed out after 15000ms');
+          console.warn("[Native TTS:Timeout] speak() timed out after 15000ms");
+          resolve('timeout');
+        }, 15000);
+      });
+
+      try {
+        const result = await Promise.race([
+          TextToSpeech.speak({
+            text: cleanText,
+            lang: 'en-US',
+            rate: 1.0,
+          }).then(() => 'finished' as const),
+          timeoutPromise
+        ]);
+
+        if (result === 'finished' && !didTimeout) {
+          addDebugLog('TTS:Finished', 'Native TextToSpeech.speak() completed successfully');
+          console.log("[Native TTS:Finished] speak() completed successfully");
+        }
+      } catch (err: any) {
+        addDebugLog('TTS:Error', `Native TextToSpeech error: ${err?.message || String(err)}`);
+        console.error("[Native TTS:Error] Native TextToSpeech speak error:", err);
+      } finally {
+        if (timer) clearTimeout(timer);
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        scheduleListeningRestart();
+      }
+      return;
+    }
+
+    // 2. Web browser fallback with SpeechSynthesis
     if (typeof window === 'undefined' || !window.speechSynthesis) {
       if (isActiveRef.current && mode === 'continuous') {
         scheduleListeningRestart(PLAYBACK_COOLDOWN_MS);
@@ -266,9 +316,6 @@ export default function LiveVoice() {
 
     try {
       window.speechSynthesis.cancel();
-
-      // Clean markdown symbols for natural TTS speech
-      const cleanText = text.replace(/[*#_`~>]/g, '').trim();
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.rate = 1.05;
       utterance.pitch = 1.0;
@@ -288,11 +335,13 @@ export default function LiveVoice() {
       utterance.onstart = () => {
         setIsSpeaking(true);
         isSpeakingRef.current = true;
+        addDebugLog('TTS:Start', `Web SpeechSynthesis started (${cleanText.length} chars)`);
       };
 
       utterance.onend = () => {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
+        addDebugLog('TTS:Finished', 'Web SpeechSynthesis completed');
         // Resume continuous listening ONLY after playback fully completes, with a short cooldown buffer
         // to avoid catching playback tail audio from the device speaker
         if (isActiveRef.current && mode === 'continuous') {
@@ -302,6 +351,7 @@ export default function LiveVoice() {
 
       utterance.onerror = (e) => {
         console.warn("TTS playback error:", e);
+        addDebugLog('TTS:Error', `Web SpeechSynthesis error: ${e.error || 'unknown'}`);
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         if (isActiveRef.current && mode === 'continuous') {
@@ -310,8 +360,9 @@ export default function LiveVoice() {
       };
 
       window.speechSynthesis.speak(utterance);
-    } catch (ttsErr) {
+    } catch (ttsErr: any) {
       console.warn("TTS execution error:", ttsErr);
+      addDebugLog('TTS:Error', `Web SpeechSynthesis exception: ${ttsErr?.message || String(ttsErr)}`);
       setIsSpeaking(false);
       isSpeakingRef.current = false;
       if (isActiveRef.current && mode === 'continuous') {
