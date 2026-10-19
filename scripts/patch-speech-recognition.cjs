@@ -1,10 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 
-const pluginJavaPath = path.resolve(
+const pluginDir = path.resolve(
   __dirname,
-  '../node_modules/@capacitor-community/speech-recognition/android/src/main/java/com/getcapacitor/community/speechrecognition/SpeechRecognition.java'
+  '../node_modules/@capacitor-community/speech-recognition/android/src/main/java/com/getcapacitor/community/speechrecognition'
 );
+const pluginJavaPath = path.resolve(pluginDir, 'SpeechRecognition.java');
+const backupPath = path.resolve(__dirname, 'SpeechRecognition.java.backup');
+
+// If the target file is missing but we have a backup, restore it
+if (!fs.existsSync(pluginJavaPath) && fs.existsSync(backupPath)) {
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.copyFileSync(backupPath, pluginJavaPath);
+  console.log('[patch-speech-recognition] Restored SpeechRecognition.java from backup.');
+}
 
 if (fs.existsSync(pluginJavaPath)) {
   let content = fs.readFileSync(pluginJavaPath, 'utf8');
@@ -53,4 +62,7 @@ if (fs.existsSync(pluginJavaPath)) {
   } else {
     console.log('[patch-speech-recognition] SpeechRecognition.java is already up to date.');
   }
+
+  // Always update backup with the patched version
+  fs.copyFileSync(pluginJavaPath, backupPath);
 }

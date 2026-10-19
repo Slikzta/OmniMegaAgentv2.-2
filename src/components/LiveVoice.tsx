@@ -180,6 +180,9 @@ export default function LiveVoice() {
   const speechRecognitionRef = useRef<any>(null);
   const nativeListenerRef = useRef<any>(null);
   const nativeStateListenerRef = useRef<any>(null);
+  const nativeListenersAttachedRef = useRef<boolean>(false);
+  const currentCycleIdRef = useRef<number>(0);
+  const isStartingRef = useRef<boolean>(false);
   const isNativeListeningRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const isRespondingRef = useRef<boolean>(false);
@@ -322,43 +325,55 @@ export default function LiveVoice() {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    if (recognitionTimeoutRef.current) {
+      clearTimeout(recognitionTimeoutRef.current);
+      recognitionTimeoutRef.current = null;
+    }
+
     const textToCommit = currentTranscriptRef.current.trim();
     currentTranscriptRef.current = '';
     setUserSpeechDetected(false);
 
-    addDebugLog('commitCurrentUtterance', `captured: "${textToCommit}" (isSpeaking=${isSpeakingRef.current}, isResponding=${isRespondingRef.current})`);
+    const cycleId = currentCycleIdRef.current;
+    addDebugLog('commitCurrentUtterance', `[Cycle #${cycleId}] captured: "${textToCommit}" (isSpeaking=${isSpeakingRef.current}, isResponding=${isRespondingRef.current})`);
 
     if (!textToCommit) {
-      console.log("[Native STT:Commit] Buffer empty, no speech to commit.");
+      console.log(`[Native STT:Commit:Cycle#${cycleId}] Buffer empty, no speech to commit.`);
       return;
     }
 
     if (isSpeakingRef.current || isRespondingRef.current) {
-      console.log("[Native STT:Commit] Ignored: Sierra is currently speaking or generating response.");
+      console.log(`[Native STT:Commit:Cycle#${cycleId}] Ignored: Sierra is currently speaking or generating response.`);
       return;
     }
 
-    console.log("[Native STT:FinalResult] Complete user utterance captured:", textToCommit);
-    console.log("[Native STT:Handoff] Dispatching utterance to handleUserUtterance...");
+    console.log(`[Native STT:FinalResult:Cycle#${cycleId}] Complete user utterance captured:`, textToCommit);
+    console.log(`[Native STT:Handoff:Cycle#${cycleId}] Dispatching utterance to handleUserUtterance...`);
     consecutiveFailuresRef.current = 0;
+    await stopSpeechToText();
     await handleUserUtterance(textToCommit);
   };
 
   const handleSilenceOrEmpty = () => {
-    addDebugLog('STT:SilenceOrEmpty', `Round completed without speech (failures: ${consecutiveFailuresRef.current + 1}/${MAX_RECOGNITION_RETRIES})`);
-    console.log("[Native STT] Listening round completed with no speech captured");
+    const cycleId = currentCycleIdRef.current;
+    addDebugLog('STT:SilenceOrEmpty', `[Cycle #${cycleId}] Round completed without speech (failures: ${consecutiveFailuresRef.current + 1}/${MAX_RECOGNITION_RETRIES})`);
+    console.log(`[Native STT:Cycle#${cycleId}] Listening round completed with no speech captured`);
     isNativeListeningRef.current = false;
+    isStartingRef.current = false;
     setUserSpeechDetected(false);
 
     if (isActiveRef.current && !isSpeakingRef.current && !isRespondingRef.current && mode === 'continuous') {
       consecutiveFailuresRef.current++;
-      console.log(`[Native STT] Consecutive silence/empty count: ${consecutiveFailuresRef.current}/${MAX_RECOGNITION_RETRIES}`);
+      console.log(`[Native STT:Cycle#${cycleId}] Consecutive silence/empty count: ${consecutiveFailuresRef.current}/${MAX_RECOGNITION_RETRIES}`);
       if (consecutiveFailuresRef.current >= MAX_RECOGNITION_RETRIES) {
-        console.warn("[Native STT] Continuous listening paused after maximum inactivity.");
+        console.warn(`[Native STT:Cycle#${cycleId}] Continuous listening paused after maximum inactivity.`);
+        addDebugLog('STT:Paused', `Continuous listening paused after ${MAX_RECOGNITION_RETRIES} empty cycles. Tap mic to resume.`);
         toast.info("Listening paused. Tap microphone to resume.");
         return;
       }
-      scheduleListeningRestart(600);
+      const backoff = Math.min(600 * consecutiveFailuresRef.current, 3000);
+      addDebugLog('STT:Retry', `[Cycle #${cycleId}] Scheduling listening retry with ${backoff}ms backoff (attempt ${consecutiveFailuresRef.current}/${MAX_RECOGNITION_RETRIES})`);
+      scheduleListeningRestart(backoff);
     }
   };
 
@@ -467,29 +482,31 @@ export default function LiveVoice() {
     setConnectionError(null);
 
     try {
-      // 1. Request user microphone with hardware Acoustic Echo Cancellation enabled
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: 1,
-            sampleRate: 16000,
-          },
-        });
-        mediaStreamRef.current = stream;
-      } catch (micErr: any) {
-        if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
-          throw new Error("Microphone access denied. Please allow microphone permissions in your browser or device settings.");
+      if (!Capacitor.isNativePlatform()) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+              sampleRate: 16000,
+            },
+          });
+          mediaStreamRef.current = stream;
+          await startAudioCapture();
+        } catch (micErr: any) {
+          if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
+            throw new Error("Microphone access denied. Please allow microphone permissions in your browser or device settings.");
+          }
+          throw new Error("Unable to access microphone: " + (micErr.message || "Device error"));
         }
-        throw new Error("Unable to access microphone: " + (micErr.message || "Device error"));
+      } else {
+        // Native Android: CapSpeechRecognition manages microphone hardware directly.
+        // Stop any active Web Audio capture so Android SpeechRecognizer has exclusive mic access.
+        stopAudioCapture();
       }
 
-      // 2. Start audio capture for visual audio monitoring
-      await startAudioCapture();
-
-      // 3. Mark session active and start speech recognition
       setIsActive(true);
       isActiveRef.current = true;
       setIsConnecting(false);
@@ -518,7 +535,13 @@ export default function LiveVoice() {
     isSpeakingRef.current = false;
     setUserSpeechDetected(false);
     consecutiveFailuresRef.current = 0;
+    isStartingRef.current = false;
+    currentTranscriptRef.current = '';
 
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
     if (cooldownTimerRef.current) {
       clearTimeout(cooldownTimerRef.current);
       cooldownTimerRef.current = null;
@@ -543,7 +566,92 @@ export default function LiveVoice() {
 
     stopAudioCapture();
     stopSpeechToText();
+    teardownNativeListeners();
     stopPlayback();
+  };
+
+  const setupNativeListeners = async () => {
+    if (nativeListenersAttachedRef.current) {
+      return;
+    }
+
+    addDebugLog('STT:Listeners', 'Setting up native partialResults and listeningState listeners...');
+    console.log("[Native STT:Listeners] Setting up native partialResults and listeningState listeners...");
+
+    try {
+      // 1. partialResults listener
+      nativeListenerRef.current = await withNativeTimeout(
+        CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
+          const cycleId = currentCycleIdRef.current;
+          addDebugLog('partialResults', `[Cycle #${cycleId}] matches: ${JSON.stringify(data?.matches)}`);
+          console.log(`[Native STT:partialResults:Cycle#${cycleId}] Matches:`, data?.matches);
+
+          if (isSpeakingRef.current || isRespondingRef.current) {
+            addDebugLog('partialResults', `[Cycle #${cycleId}] Ignored: Sierra currently speaking/responding`);
+            return;
+          }
+
+          if (data?.matches && Array.isArray(data.matches) && data.matches.length > 0) {
+            const topMatch = data.matches[0].trim();
+            if (topMatch) {
+              currentTranscriptRef.current = topMatch;
+              setUserSpeechDetected(true);
+              consecutiveFailuresRef.current = 0;
+              addDebugLog('partialResults:Buffer', `[Cycle #${cycleId}] Buffer updated: "${topMatch}"`);
+              console.log(`[Native STT:Buffer:Cycle#${cycleId}] "${topMatch}"`);
+
+              // Debounce silence: after 1200ms of no further speech updates, commit the utterance
+              if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+              }
+              silenceTimerRef.current = setTimeout(() => {
+                addDebugLog('STT:SilenceDebounce', `[Cycle #${cycleId}] Silence debounce fired (1200ms), committing: "${topMatch}"`);
+                console.log(`[Native STT:SilenceDebounce:Cycle#${cycleId}] Committing utterance...`);
+                commitCurrentUtterance();
+              }, 1200);
+            }
+          }
+        }),
+        2000,
+        null,
+        'CapSpeechRecognition.addListener("partialResults")'
+      );
+
+      // 2. listeningState listener
+      nativeStateListenerRef.current = await withNativeTimeout(
+        CapSpeechRecognition.addListener('listeningState', (data: { status: 'started' | 'stopped'; error?: string; errorCode?: number }) => {
+          const cycleId = currentCycleIdRef.current;
+          addDebugLog('listeningState', `[Cycle #${cycleId}] status: "${data?.status}", payload: ${JSON.stringify(data)}, buffer: "${currentTranscriptRef.current}"`);
+          console.log(`[Native STT:listeningState:Cycle#${cycleId}] status=${data?.status}`, data);
+
+          if (data?.status === 'started') {
+            isNativeListeningRef.current = true;
+          } else if (data?.status === 'stopped') {
+            isNativeListeningRef.current = false;
+            if (data?.error) {
+              addDebugLog('STT:NativeError', `[Cycle #${cycleId}] Native recognizer reported: "${data.error}" (code: ${data.errorCode})`);
+              console.warn(`[Native STT:NativeError:Cycle#${cycleId}]`, data.error, data.errorCode);
+            }
+            if (currentTranscriptRef.current.trim()) {
+              commitCurrentUtterance();
+            } else {
+              handleSilenceOrEmpty();
+            }
+          }
+        }),
+        2000,
+        null,
+        'CapSpeechRecognition.addListener("listeningState")'
+      );
+
+      nativeListenersAttachedRef.current = true;
+      addDebugLog('STT:Listeners', 'Native listeners active and ready');
+      console.log("[Native STT:Listeners] Native listeners active and ready");
+    } catch (err: any) {
+      nativeListenersAttachedRef.current = false;
+      addDebugLog('STT:Listeners:Error', `Listener registration error: ${err?.message || String(err)}`);
+      console.error("[Native STT:Listeners:Error] Registration error:", err);
+    }
   };
 
   const startSpeechToText = async () => {
@@ -554,11 +662,12 @@ export default function LiveVoice() {
 
     // 1. Native Capacitor Speech Recognition on Android / iOS
     if (Capacitor.isNativePlatform()) {
-      if (isNativeListeningRef.current) {
-        addDebugLog('STT:Start', 'Already listening natively, skipping start');
-        console.log("[Native STT] Already listening natively, skipping duplicate start call");
+      if (isStartingRef.current || isNativeListeningRef.current) {
+        addDebugLog('STT:Start', `Already starting/listening (starting=${isStartingRef.current}, listening=${isNativeListeningRef.current}), skipping duplicate start`);
+        console.log(`[Native STT] Duplicate start prevented (starting=${isStartingRef.current}, listening=${isNativeListeningRef.current})`);
         return;
       }
+      isStartingRef.current = true;
 
       try {
         addDebugLog('STT:Start', 'Checking availability and permissions...');
@@ -574,6 +683,7 @@ export default function LiveVoice() {
           addDebugLog('STT:Start', 'Native speech recognition unavailable');
           console.warn("[Native STT:Start] Native speech recognition unavailable on device");
           toast.error("Device speech recognition engine not available");
+          isStartingRef.current = false;
           return;
         }
 
@@ -598,112 +708,26 @@ export default function LiveVoice() {
             addDebugLog('STT:Start', 'Microphone permission denied by user');
             console.warn("[Native STT:Start] Microphone permission denied by user");
             toast.error("Microphone permission required for speech recognition");
+            isStartingRef.current = false;
             return;
           }
         }
 
-        // Clean up previous listeners and reset buffer with timeout race
-        addDebugLog('STT:Start', 'Cleaning up previous listeners (2s timeout)...');
-        console.log("[Native STT:Start] Cleaning up previous listeners with 2000ms timeout race...");
-        let cleanupTimedOut = false;
-        let cleanupTimer: any = null;
-        await Promise.race([
-          stopSpeechToText().then(() => {
-            if (!cleanupTimedOut) {
-              addDebugLog('STT:Start', 'stopSpeechToText() cleanup completed normally');
-              console.log("[Native STT:Start] stopSpeechToText() cleanup completed normally");
-            }
-          }),
-          new Promise<void>((resolve) => {
-            cleanupTimer = setTimeout(() => {
-              cleanupTimedOut = true;
-              addDebugLog('STT:Timeout', 'stopSpeechToText() timed out after 2000ms, continuing anyway');
-              console.warn("[Native STT:Start] stopSpeechToText() timed out after 2000ms, proceeding with startup");
-              resolve();
-            }, 2000);
-          })
-        ]);
-        if (cleanupTimer) clearTimeout(cleanupTimer);
+        // Setup persistent listeners
+        await setupNativeListeners();
+
+        // Increment cycle session identifier and clear buffer
+        const cycleId = ++currentCycleIdRef.current;
         currentTranscriptRef.current = '';
 
-        addDebugLog('STT:Start', 'Attaching partialResults and listeningState listeners...');
-        console.log("[Native STT:Start] Attaching partialResults and listeningState listeners...");
-
-        // Listen for partial and final result updates
-        addDebugLog('STT:Start', 'Calling await CapSpeechRecognition.addListener("partialResults")...');
-        console.log("[Native STT:Start] Calling await CapSpeechRecognition.addListener('partialResults')...");
-        nativeListenerRef.current = await withNativeTimeout(
-          CapSpeechRecognition.addListener('partialResults', (data: { matches: string[] }) => {
-            addDebugLog('partialResults', `matches: ${JSON.stringify(data?.matches)}`);
-            console.log("[Native STT:partialResults] Event received with matches:", data?.matches);
-            if (isSpeakingRef.current || isRespondingRef.current) {
-              addDebugLog('partialResults', 'Ignored: currently speaking or responding');
-              console.log("[Native STT:partialResults] Ignored: Sierra is currently speaking or responding");
-              return;
-            }
-            if (data?.matches && data.matches.length > 0) {
-              const topMatch = data.matches[0].trim();
-              if (topMatch) {
-                currentTranscriptRef.current = topMatch;
-                setUserSpeechDetected(true);
-                consecutiveFailuresRef.current = 0;
-                addDebugLog('partialResults:Buffer', `Buffer updated: "${topMatch}"`);
-                console.log("[Native STT:partialResults] Transcript buffer updated:", topMatch);
-
-                // Reset silence debounce timer: commit utterance if user pauses for 1200ms
-                if (silenceTimerRef.current) {
-                  clearTimeout(silenceTimerRef.current);
-                }
-                silenceTimerRef.current = setTimeout(() => {
-                  addDebugLog('STT:SilenceDebounce', `Silence timer fired (1200ms), committing utterance: "${topMatch}"`);
-                  console.log("[Native STT:SilenceDebounce] Silence timer fired after speech. Finalizing utterance...");
-                  commitCurrentUtterance();
-                }, 1200);
-              }
-            }
-          }),
-          2000,
-          null,
-          'CapSpeechRecognition.addListener("partialResults")'
-        );
-        addDebugLog('STT:Start', 'Completed await CapSpeechRecognition.addListener("partialResults")');
-        console.log("[Native STT:Start] Completed await CapSpeechRecognition.addListener('partialResults')");
-
-        // Listen for native engine listening state transitions
-        addDebugLog('STT:Start', 'Calling await CapSpeechRecognition.addListener("listeningState")...');
-        console.log("[Native STT:Start] Calling await CapSpeechRecognition.addListener('listeningState')...");
-        nativeStateListenerRef.current = await withNativeTimeout(
-          CapSpeechRecognition.addListener('listeningState', (data: { status: 'started' | 'stopped' }) => {
-            addDebugLog('listeningState', `status: "${data?.status}", currentBuffer: "${currentTranscriptRef.current}"`);
-            console.log("[Native STT:listeningState] State changed to:", data?.status);
-            if (data?.status === 'stopped') {
-              console.log("[Native STT:listeningState] Native engine stopped. Current buffer:", currentTranscriptRef.current);
-              if (currentTranscriptRef.current.trim()) {
-                commitCurrentUtterance();
-              } else {
-                handleSilenceOrEmpty();
-              }
-            }
-          }),
-          2000,
-          null,
-          'CapSpeechRecognition.addListener("listeningState")'
-        );
-        addDebugLog('STT:Start', 'Completed await CapSpeechRecognition.addListener("listeningState")');
-        console.log("[Native STT:Start] Completed await CapSpeechRecognition.addListener('listeningState')");
-
-        isNativeListeningRef.current = true;
-        addDebugLog('STT:Start', 'Calling CapSpeechRecognition.start({ language: "en-US", partialResults: true })');
-        console.log("[Native STT:Start] Calling CapSpeechRecognition.start({ language: 'en-US', partialResults: true })...");
-
-        // Maximum timeout per recognition attempt
+        // Recognition cycle timeout (12 seconds)
         if (recognitionTimeoutRef.current) {
           clearTimeout(recognitionTimeoutRef.current);
         }
         recognitionTimeoutRef.current = setTimeout(async () => {
           recognitionTimeoutRef.current = null;
-          addDebugLog('STT:Timeout', `12s cycle timeout reached (buffer: "${currentTranscriptRef.current}")`);
-          console.warn("[Native STT:Timeout] 12s recognition cycle timeout reached");
+          addDebugLog('STT:Timeout', `[Cycle #${cycleId}] 12s cycle timeout reached (buffer: "${currentTranscriptRef.current}")`);
+          console.warn(`[Native STT:Timeout:Cycle#${cycleId}] 12s recognition cycle timeout reached`);
           if (currentTranscriptRef.current.trim()) {
             commitCurrentUtterance();
           } else {
@@ -711,7 +735,7 @@ export default function LiveVoice() {
               try {
                 await withNativeTimeout(
                   CapSpeechRecognition.stop(),
-                  2000,
+                  1500,
                   undefined,
                   'CapSpeechRecognition.stop()'
                 );
@@ -721,8 +745,9 @@ export default function LiveVoice() {
           }
         }, RECOGNITION_TIMEOUT_MS);
 
-        addDebugLog('STT:Start', 'Invoking CapSpeechRecognition.start()...');
-        console.log("[Native STT:Start] Invoking CapSpeechRecognition.start()...");
+        const startTime = Date.now();
+        addDebugLog('STT:Start', `[Cycle #${cycleId}] Invoking CapSpeechRecognition.start({ language: "en-US", partialResults: true })...`);
+        console.log(`[Native STT:Start:Cycle#${cycleId}] Invoking start...`);
 
         let result: any = null;
         try {
@@ -733,23 +758,29 @@ export default function LiveVoice() {
             popup: false,
             partialResults: true,
           });
-          addDebugLog('STT:Start', `CapSpeechRecognition.start resolved with raw value: ${JSON.stringify(result)}`);
-          console.log("[Native STT:Start] CapSpeechRecognition.start resolved with raw value:", result);
+          const elapsed = Date.now() - startTime;
+          addDebugLog('STT:Start', `[Cycle #${cycleId}] CapSpeechRecognition.start resolved in ${elapsed}ms with: ${JSON.stringify(result)}`);
+          console.log(`[Native STT:Start:Cycle#${cycleId}] Resolved in ${elapsed}ms:`, result);
         } catch (startErr: any) {
-          addDebugLog('STT:Start', `CapSpeechRecognition.start caught thrown error or rejection: ${startErr?.message || JSON.stringify(startErr)}`);
-          console.error("[Native STT:Start] CapSpeechRecognition.start caught thrown error or rejection:", startErr);
+          const elapsed = Date.now() - startTime;
+          addDebugLog('STT:Start', `[Cycle #${cycleId}] CapSpeechRecognition.start rejected in ${elapsed}ms: ${startErr?.message || JSON.stringify(startErr)}`);
+          console.error(`[Native STT:Start:Cycle#${cycleId}] Rejected in ${elapsed}ms:`, startErr);
           throw startErr;
         }
 
+        isNativeListeningRef.current = true;
+        isStartingRef.current = false;
+
         // If the platform returns matches directly in the start resolution
-        if (result?.matches && result.matches.length > 0 && result.matches[0].trim()) {
-          addDebugLog('STT:Start', `Direct matches returned on resolve: "${result.matches[0]}"`);
-          console.log("[Native STT:Start] Direct matches received upon resolve:", result.matches[0]);
+        if (result?.matches && Array.isArray(result.matches) && result.matches.length > 0 && result.matches[0].trim()) {
+          addDebugLog('STT:Start', `[Cycle #${cycleId}] Direct matches returned on resolve: "${result.matches[0]}"`);
+          console.log(`[Native STT:Start:Cycle#${cycleId}] Direct matches:`, result.matches[0]);
           currentTranscriptRef.current = result.matches[0].trim();
         }
 
         return;
       } catch (nativeErr: any) {
+        isStartingRef.current = false;
         if (recognitionTimeoutRef.current) {
           clearTimeout(recognitionTimeoutRef.current);
           recognitionTimeoutRef.current = null;
@@ -773,7 +804,7 @@ export default function LiveVoice() {
             toast.error("Speech recognition paused due to repeated device errors.");
             return;
           }
-          const backoff = 600 * consecutiveFailuresRef.current;
+          const backoff = Math.min(800 * consecutiveFailuresRef.current, 3000);
           scheduleListeningRestart(backoff);
         }
         return;
@@ -853,6 +884,22 @@ export default function LiveVoice() {
     }
   };
 
+  const teardownNativeListeners = async () => {
+    if (nativeListenerRef.current) {
+      try {
+        await withNativeTimeout(nativeListenerRef.current.remove(), 1000, undefined, 'nativeListener.remove()');
+      } catch (_) {}
+      nativeListenerRef.current = null;
+    }
+    if (nativeStateListenerRef.current) {
+      try {
+        await withNativeTimeout(nativeStateListenerRef.current.remove(), 1000, undefined, 'nativeStateListener.remove()');
+      } catch (_) {}
+      nativeStateListenerRef.current = null;
+    }
+    nativeListenersAttachedRef.current = false;
+  };
+
   const stopSpeechToText = async () => {
     console.log("[Native STT:Stop] stopSpeechToText called");
     if (silenceTimerRef.current) {
@@ -874,26 +921,12 @@ export default function LiveVoice() {
 
     if (Capacitor.isNativePlatform()) {
       isNativeListeningRef.current = false;
+      isStartingRef.current = false;
       setUserSpeechDetected(false);
-      if (nativeListenerRef.current) {
-        try {
-          await withNativeTimeout(nativeListenerRef.current.remove(), 2000, undefined, 'nativeListener.remove()');
-        } catch (_) {}
-        nativeListenerRef.current = null;
-      }
-      if (nativeStateListenerRef.current) {
-        try {
-          await withNativeTimeout(nativeStateListenerRef.current.remove(), 2000, undefined, 'nativeStateListener.remove()');
-        } catch (_) {}
-        nativeStateListenerRef.current = null;
-      }
       try {
-        await withNativeTimeout(CapSpeechRecognition.removeAllListeners(), 2000, undefined, 'CapSpeechRecognition.removeAllListeners()');
+        await withNativeTimeout(CapSpeechRecognition.stop(), 1500, undefined, 'CapSpeechRecognition.stop()');
       } catch (_) {}
-      try {
-        await withNativeTimeout(CapSpeechRecognition.stop(), 2000, undefined, 'CapSpeechRecognition.stop()');
-      } catch (_) {}
-      console.log("[Native STT:Stop] Native recognizer stopped and listeners cleared");
+      console.log("[Native STT:Stop] Native recognizer stopped");
       return;
     }
 

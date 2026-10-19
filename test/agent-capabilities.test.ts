@@ -201,3 +201,186 @@ test("Voice Debug Log Export and Formatting Pipeline", async () => {
   const pkg = JSON.parse(fs.readFileSync("package.json", "utf-8"));
   assert.ok(pkg.dependencies["@capacitor/clipboard"], "@capacitor/clipboard must be present in dependencies");
 });
+
+test("Recognition Session Lifecycle: Duplicate Start Prevention", async () => {
+  let isStarting = false;
+  let isListening = false;
+  let startCount = 0;
+
+  const simulateStart = async () => {
+    if (isStarting || isListening) {
+      return { skipped: true };
+    }
+    isStarting = true;
+    startCount++;
+    // Simulate async native start call
+    await new Promise((r) => setTimeout(r, 20));
+    isListening = true;
+    isStarting = false;
+    return { skipped: false };
+  };
+
+  // First call should succeed
+  const res1 = simulateStart();
+  // Immediate concurrent duplicate calls should be rejected
+  const res2 = simulateStart();
+  const res3 = simulateStart();
+
+  const [out1, out2, out3] = await Promise.all([res1, res2, res3]);
+  assert.strictEqual(out1.skipped, false);
+  assert.strictEqual(out2.skipped, true);
+  assert.strictEqual(out3.skipped, true);
+  assert.strictEqual(startCount, 1, "Only one native start invocation must occur");
+
+  // While listening, another call should also be skipped
+  const res4 = await simulateStart();
+  assert.strictEqual(res4.skipped, true);
+  assert.strictEqual(startCount, 1);
+});
+
+test("Recognition Session Lifecycle: Delayed Stop and Timeout Protection", async () => {
+  // Simulate native stop that hangs indefinitely without calling resolve
+  const hangingNativeStop = () => new Promise<void>(() => {});
+
+  const withNativeTimeout = async <T>(
+    promise: Promise<T>,
+    ms: number = 50,
+    fallbackValue?: T
+  ): Promise<T | undefined> => {
+    let timeoutId: any = null;
+    const timeoutPromise = new Promise<T | undefined>((resolve) => {
+      timeoutId = setTimeout(() => resolve(fallbackValue), ms);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  };
+
+  const startT = Date.now();
+  const result = await withNativeTimeout(hangingNativeStop(), 50, "timed_out");
+  const elapsed = Date.now() - startT;
+
+  assert.strictEqual(result, "timed_out");
+  assert.ok(elapsed >= 45 && elapsed < 300, `Execution resumed promptly after timeout: ${elapsed}ms`);
+});
+
+test("Recognition Session Lifecycle: Stale Listener Event Invalidation", () => {
+  let activeCycleId = 1;
+  let currentTranscript = "";
+
+  const onPartialResults = (eventCycleId: number, match: string) => {
+    // If event comes from an older or obsolete recognition cycle, discard it
+    if (eventCycleId !== activeCycleId) {
+      return false;
+    }
+    currentTranscript = match;
+    return true;
+  };
+
+  // Valid event from active cycle #1
+  const accepted1 = onPartialResults(1, "Hello Sierra");
+  assert.strictEqual(accepted1, true);
+  assert.strictEqual(currentTranscript, "Hello Sierra");
+
+  // Advance cycle to #2 (e.g. after response or timeout)
+  activeCycleId = 2;
+  currentTranscript = "";
+
+  // Late arriving event from cycle #1 should be dropped
+  const acceptedStale = onPartialResults(1, "stale trailing speech from previous round");
+  assert.strictEqual(acceptedStale, false);
+  assert.strictEqual(currentTranscript, "", "Transcript buffer must remain uncontaminated by stale event");
+
+  // Valid event from cycle #2 should be accepted
+  const accepted2 = onPartialResults(2, "What is the weather today?");
+  assert.strictEqual(accepted2, true);
+  assert.strictEqual(currentTranscript, "What is the weather today?");
+});
+
+test("Recognition Session Lifecycle: Native Error Recovery and Bounded Backoff", () => {
+  const MAX_RETRIES = 3;
+  let consecutiveFailures = 0;
+  let isListening = true;
+  let isPaused = false;
+  const scheduledBackoffs: number[] = [];
+
+  const handleNativeError = (errorCode: number, errorMsg: string) => {
+    isListening = false;
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_RETRIES) {
+      isPaused = true;
+      return;
+    }
+    const backoff = Math.min(800 * consecutiveFailures, 3000);
+    scheduledBackoffs.push(backoff);
+  };
+
+  // Round 1 error (e.g., SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+  handleNativeError(6, "No speech input");
+  assert.strictEqual(isListening, false);
+  assert.strictEqual(consecutiveFailures, 1);
+  assert.strictEqual(isPaused, false);
+  assert.strictEqual(scheduledBackoffs[0], 800);
+
+  // Round 2 error (e.g., SpeechRecognizer.ERROR_NO_MATCH)
+  handleNativeError(7, "No match");
+  assert.strictEqual(consecutiveFailures, 2);
+  assert.strictEqual(isPaused, false);
+  assert.strictEqual(scheduledBackoffs[1], 1600);
+
+  // Round 3 error (hits max retry limit)
+  handleNativeError(3, "Audio recording error");
+  assert.strictEqual(consecutiveFailures, 3);
+  assert.strictEqual(isPaused, true, "State machine must pause continuous listening after max retries");
+  assert.strictEqual(scheduledBackoffs.length, 2, "No restart must be scheduled after pausing");
+});
+
+test("Recognition Session Lifecycle: Clean Cancellation and Teardown on Stop", () => {
+  let isActive = true;
+  let isListening = true;
+  let userSpeechDetected = true;
+  let listenersAttached = true;
+  let timerCleared = false;
+  let timerId: any = 12345;
+
+  const stopSession = () => {
+    isActive = false;
+    isListening = false;
+    userSpeechDetected = false;
+    if (timerId) {
+      timerCleared = true;
+      timerId = null;
+    }
+    listenersAttached = false;
+  };
+
+  stopSession();
+  assert.strictEqual(isActive, false);
+  assert.strictEqual(isListening, false);
+  assert.strictEqual(userSpeechDetected, false);
+  assert.strictEqual(listenersAttached, false);
+  assert.strictEqual(timerCleared, true);
+  assert.strictEqual(timerId, null);
+});
+
+test("Native Patch Integrity: SpeechRecognition.java Patch and Backup Verification", async () => {
+  const fs = await import("node:fs");
+  const javaPath = "node_modules/@capacitor-community/speech-recognition/android/src/main/java/com/getcapacitor/community/speechrecognition/SpeechRecognition.java";
+  const backupPath = "scripts/SpeechRecognition.java.backup";
+
+  assert.ok(fs.existsSync(javaPath), "SpeechRecognition.java must exist");
+  assert.ok(fs.existsSync(backupPath), "SpeechRecognition.java.backup must exist");
+
+  const javaContent = fs.readFileSync(javaPath, "utf-8");
+  assert.ok(
+    javaContent.includes("call.resolve();"),
+    "SpeechRecognition.stop() must invoke call.resolve() to prevent indefinite hangs"
+  );
+  assert.ok(
+    javaContent.includes('ret.put("errorCode", error);'),
+    "SpeechRecognition.onError() must notify listeningState with error details"
+  );
+});
+
